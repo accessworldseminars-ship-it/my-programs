@@ -11,22 +11,21 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
 from telegram.ext import ContextTypes
 
-print("=== Joshua AI Twin Bot Starting ===")
-print(f"Python version: {sys.version}")
+# Force flush so Render actually shows output
+print("=== Joshua AI Twin Bot Starting ===", flush=True)
+print(f"Python: {sys.version}", flush=True)
+print(f"Current dir: {os.getcwd()}", flush=True)
+print(f"Env vars present: {[k for k in os.environ.keys() if 'KEY' in k or 'TOKEN' in k or 'ID' in k]}", flush=True)
 
-# ============================================
-# ENVIRONMENT VARIABLES
-# ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 R2_ACCESS_KEY = os.environ.get('R2_ACCESS_KEY')
 R2_SECRET_KEY = os.environ.get('R2_SECRET_KEY')
 ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
-BUCKET_NAME = "joshua-bot-brain"
 
-print(f"R2 Bucket: {BUCKET_NAME}")
-print(f"Account ID: {ACCOUNT_ID[:10]}..." if ACCOUNT_ID else "Account ID: MISSING")
-print(f"Telegram Token: {'SET' if TELEGRAM_TOKEN else 'MISSING'}")
+print(f"Telegram Token: {'✅ SET' if TELEGRAM_TOKEN else '❌ MISSING'}", flush=True)
+print(f"R2 Keys: {'✅ SET' if R2_ACCESS_KEY and R2_SECRET_KEY else '❌ MISSING'}", flush=True)
+print(f"Account ID: {'✅ SET' if ACCOUNT_ID else '❌ MISSING'}", flush=True)
 
 # ============================================
 # DOWNLOAD + EXTRACT BRAIN
