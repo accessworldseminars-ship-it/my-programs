@@ -1,18 +1,15 @@
 import os
 import sys
 import traceback
-import threading
 import zipfile
 import boto3
 import requests
-import time
 from flask import Flask, request
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
 from telegram.ext import ContextTypes
 
 print("=== Joshua AI Twin Bot Starting ===", flush=True)
-print(f"Python: {sys.version}", flush=True)
 
 # ============================================
 # ENVIRONMENT VARIABLES
@@ -27,16 +24,14 @@ RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}")
 print(f"R2: {'✅' if R2_ACCESS_KEY else '❌'}")
-print(f"Cloudflare: {'✅' if CLOUDFLARE_API_TOKEN else '❌'}")
 
 # ============================================
-# DOWNLOAD BRAIN FROM R2
+# DOWNLOAD BRAIN
 # ============================================
 def download_brain():
     if os.path.exists('./bot_brain/chroma.sqlite3'):
         print("✅ Brain already exists")
         return True
-    
     print("📥 Downloading brain from R2...")
     try:
         s3 = boto3.client(
@@ -49,7 +44,6 @@ def download_brain():
         s3.download_file(BUCKET_NAME, 'bot_brain.zip', '/tmp/brain.zip')
         print("✅ Downloaded")
 
-        # Clean old extraction
         if os.path.exists('./bot_brain'):
             import shutil
             shutil.rmtree('./bot_brain')
@@ -77,15 +71,8 @@ if download_brain():
         client = chromadb.PersistentClient(path="./bot_brain")
         collection = client.get_collection("my_brain")
         
-        # Safer count (avoids the 'int has no len()' error)
-        try:
-            count = collection.count()
-        except:
-            data = collection.get(limit=1)
-            count = len(data['ids']) if data and 'ids' in data else "unknown"
-        
+        count = collection.count()
         print(f"✅ Brain loaded! {count:,} chunks")
-        
     except Exception as e:
         print(f"❌ Brain error: {e}")
         traceback.print_exc()
@@ -95,7 +82,7 @@ if collection is None:
     print("⚠️ FALLBACK MODE - no brain")
 
 # ============================================
-# AI RESPONSE ENGINE
+# AI TWIN
 # ============================================
 class CloudflareTwin:
     def __init__(self):
@@ -105,34 +92,41 @@ class CloudflareTwin:
         context = ""
         if collection:
             try:
-                results = collection.query(query_texts=[message], n_results=3)
-                if results and results['documents']:
+                results = collection.query(query_texts=[message], n_results=2)
+                if results['documents']:
                     context = "\n".join(results['documents'][0])
-            except Exception as e:
-                print(f"Search error: {e}")
+            except:
+                pass
 
-        prompt = f"""You are Joshua Roy. Be very concise. 1-2 sentences max.
-Context from seminars: {context[:600]}
+        prompt = f"""You are Joshua Roy. Be concise (1-2 sentences).
+Context: {context[:500]}
 User: {message}
 Joshua:"""
-
         try:
             resp = requests.post(
                 self.url,
                 headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
-                json={"prompt": prompt, "max_tokens": 180, "temperature": 0.65},
+                json={"prompt": prompt, "max_tokens": 150},
                 timeout=20
             )
-            if resp.status_code == 200:
-                return resp.json()['result']['response']
-            return "I'm here. What's on your mind?"
+            return resp.json()['result']['response'] if resp.status_code == 200 else "I'm here. What's on your mind?"
         except:
-            return "Interesting point. Tell me more."
+            return "Good question. Tell me more."
 
 twin = CloudflareTwin()
 
 # ============================================
-# TELEGRAM + FLASK
+# HANDLERS (defined BEFORE use)
+# ============================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Hey, it's Josh. What's on your mind?")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    response = twin.respond(update.message.text)
+    await update.message.reply_text(response[:4000])
+
+# ============================================
+# FLASK APP
 # ============================================
 flask_app = Flask(__name__)
 
@@ -141,39 +135,27 @@ flask_app = Flask(__name__)
 def health():
     return "OK", 200
 
-# Webhook route
-@flask_app.route(f'/webhook/{TELEGRAM_TOKEN}', methods=['POST'])
-def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), app.bot)
-        app.process_update(update)
-    except:
-        pass
-    return "OK", 200
-
 # ============================================
 # MAIN
 # ============================================
 if __name__ == "__main__":
     print("\n🚀 Starting Joshua AI Twin...")
-    
-    # Build Application
-    global app
+
+    # Create Application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Set webhook
     if RENDER_URL:
-        webhook_url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
+        webhook_url = f"{RENDER_URL.rstrip('/')}/webhook/{TELEGRAM_TOKEN}"
         try:
             app.bot.set_webhook(webhook_url, drop_pending_updates=True)
-            print(f"✅ Webhook set: {webhook_url}")
+            print(f"✅ Webhook set to: {webhook_url}")
         except Exception as e:
-            print(f"Webhook warning: {e}")
-    
+            print(f"Webhook error: {e}")
+
+    print(f"📊 Brain status: {'LOADED' if collection else 'FALLBACK'}")
+
     port = int(os.environ.get("PORT", 8080))
-    print(f"📊 Brain: {'LOADED' if collection else 'FALLBACK'}")
-    print(f"✅ Bot live on port {port}")
-    
     flask_app.run(host='0.0.0.0', port=port)
