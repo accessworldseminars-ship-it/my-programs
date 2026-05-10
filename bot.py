@@ -5,6 +5,7 @@ import threading
 import zipfile
 import boto3
 import requests
+import httpx
 from flask import Flask
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
@@ -20,10 +21,13 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 R2_ACCESS_KEY = os.environ.get('R2_ACCESS_KEY')
 R2_SECRET_KEY = os.environ.get('R2_SECRET_KEY')
 ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
 BUCKET_NAME = "joshua-bot-brain"
 
 print(f"R2 Bucket: {BUCKET_NAME}")
 print(f"Account ID: {ACCOUNT_ID[:10]}..." if ACCOUNT_ID else "Account ID: MISSING")
+print(f"Telegram Token: {'SET' if TELEGRAM_TOKEN else 'MISSING'}")
+print(f"Cloudflare Token: {'SET' if CLOUDFLARE_API_TOKEN else 'MISSING'}")
 
 # ============================================
 # DOWNLOAD AND EXTRACT BRAIN
@@ -65,10 +69,15 @@ def download_and_extract_brain():
             return True
         else:
             print("❌ Extraction failed: Expected './bot_brain/chroma.sqlite3' not found")
+            if os.path.exists('./bot_brain'):
+                print("Contents of ./bot_brain:")
+                for item in os.listdir('./bot_brain'):
+                    print(f"  - {item}")
             return False
             
     except Exception as e:
         print(f"❌ Download/extract error: {e}")
+        traceback.print_exc()
         return False
 
 # ============================================
@@ -77,16 +86,35 @@ def download_and_extract_brain():
 print("\n📚 Loading brain database...")
 
 brain_loaded = download_and_extract_brain()
+print(f"brain_loaded = {brain_loaded}")
+
 collection = None
 
 if brain_loaded:
     try:
         import chromadb
+        print("✅ ChromaDB imported successfully")
+        
+        # List what's in the bot_brain folder
+        import os
+        if os.path.exists('./bot_brain'):
+            print("Contents of ./bot_brain:")
+            for item in os.listdir('./bot_brain'):
+                print(f"  - {item}")
+        else:
+            print("❌ ./bot_brain folder does NOT exist!")
+        
         brain_db = chromadb.PersistentClient(path="./bot_brain")
+        print("✅ ChromaDB client created")
+        
+        collections = brain_db.list_collections()
+        print(f"Available collections: {[c.name for c in collections]}")
+        
         collection = brain_db.get_collection("my_brain")
         print(f"✅ Brain loaded! {collection.count():,} chunks")
     except Exception as e:
         print(f"❌ Failed to load ChromaDB collection: {e}")
+        traceback.print_exc()
         collection = None
 else:
     print("⚠️ Brain not available, running in fallback mode")
@@ -131,7 +159,7 @@ Concise response (1-3 sentences):"""
         try:
             response = requests.post(
                 self.base_url,
-                headers={"Authorization": f"Bearer {os.environ.get('CLOUDFLARE_API_TOKEN')}"},
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
                 json={"prompt": prompt, "max_tokens": 200, "temperature": 0.6},
                 timeout=30
             )
@@ -178,8 +206,12 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Health check server running on port 8080")
     
-    # Start Telegram bot
+    # Start Telegram bot with timeout fix
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Fix for timeout issues on Render free tier
+    app.bot._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
