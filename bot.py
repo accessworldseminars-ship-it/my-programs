@@ -5,43 +5,39 @@ import threading
 import zipfile
 import boto3
 import requests
-import httpx
-from flask import Flask
+import time
+from flask import Flask, request
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
 from telegram.ext import ContextTypes
 
-# Force flush so Render actually shows output
 print("=== Joshua AI Twin Bot Starting ===", flush=True)
 print(f"Python: {sys.version}", flush=True)
-print(f"Current dir: {os.getcwd()}", flush=True)
-print(f"Env vars present: {[k for k in os.environ.keys() if 'KEY' in k or 'TOKEN' in k or 'ID' in k]}", flush=True)
 
+# ============================================
+# ENVIRONMENT VARIABLES
+# ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 R2_ACCESS_KEY = os.environ.get('R2_ACCESS_KEY')
 R2_SECRET_KEY = os.environ.get('R2_SECRET_KEY')
 ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
-BUCKET_NAME = os.environ.get('BUCKET_NAME', 'joshua-bot-brain')  # ← ADDED WITH DEFAULT
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'joshua-bot-brain')
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
-print(f"Telegram Token: {'✅ SET' if TELEGRAM_TOKEN else '❌ MISSING'}", flush=True)
-print(f"R2 Keys: {'✅ SET' if R2_ACCESS_KEY and R2_SECRET_KEY else '❌ MISSING'}", flush=True)
-print(f"Account ID: {'✅ SET' if ACCOUNT_ID else '❌ MISSING'}", flush=True)
-print(f"Bucket Name: {BUCKET_NAME}", flush=True)
+print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}")
+print(f"R2: {'✅' if R2_ACCESS_KEY else '❌'}")
+print(f"Cloudflare: {'✅' if CLOUDFLARE_API_TOKEN else '❌'}")
 
 # ============================================
-# DOWNLOAD + EXTRACT BRAIN
+# DOWNLOAD BRAIN FROM R2
 # ============================================
-def download_and_extract_brain():
-    if os.path.exists('./bot_brain') and os.path.exists('./bot_brain/chroma.sqlite3'):
-        print("✅ Brain already exists locally")
+def download_brain():
+    if os.path.exists('./bot_brain/chroma.sqlite3'):
+        print("✅ Brain already exists")
         return True
-
-    if not BUCKET_NAME or not ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY:
-        print("⚠️ Missing R2 credentials, skipping brain download")
-        return False
-
-    print("📥 Downloading bot_brain.zip from Cloudflare R2...")
+    
+    print("📥 Downloading brain from R2...")
     try:
         s3 = boto3.client(
             's3',
@@ -50,26 +46,20 @@ def download_and_extract_brain():
             aws_secret_access_key=R2_SECRET_KEY,
             region_name='auto'
         )
+        s3.download_file(BUCKET_NAME, 'bot_brain.zip', '/tmp/brain.zip')
+        print("✅ Downloaded")
 
-        zip_path = '/tmp/bot_brain.zip'
-        s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
-        size_mb = os.path.getsize(zip_path) / 1024 / 1024
-        print(f"✅ Downloaded {size_mb:.1f} MB")
-
-        # Clean previous extraction
+        # Clean old extraction
         if os.path.exists('./bot_brain'):
             import shutil
             shutil.rmtree('./bot_brain')
 
-        print("📦 Extracting...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        with zipfile.ZipFile('/tmp/brain.zip', 'r') as zip_ref:
             zip_ref.extractall('./')
-
-        print("✅ Extraction complete")
-        return os.path.exists('./bot_brain/chroma.sqlite3')
-
+        print("✅ Extracted")
+        return True
     except Exception as e:
-        print(f"❌ Download/extract error: {e}")
+        print(f"❌ Download failed: {e}")
         traceback.print_exc()
         return False
 
@@ -77,129 +67,113 @@ def download_and_extract_brain():
 # LOAD BRAIN
 # ============================================
 collection = None
-brain_loaded = False
-
 print("\n📚 Loading brain...")
-brain_loaded = download_and_extract_brain()
 
-if brain_loaded:
+if download_brain():
     try:
         import chromadb
-        print(f"✅ ChromaDB imported: {chromadb.__version__}")
-
+        print(f"✅ ChromaDB version: {chromadb.__version__}")
+        
         client = chromadb.PersistentClient(path="./bot_brain")
-        print("✅ ChromaDB client created")
-
-        collections = client.list_collections()
-        print(f"Available collections: {[c.name for c in collections]}")
-
         collection = client.get_collection("my_brain")
-        print("✅ Collection retrieved")
-
-        # Safer count
+        
+        # Safer count (avoids the 'int has no len()' error)
         try:
             count = collection.count()
-            print(f"✅ Brain loaded successfully! {count:,} chunks")
         except:
-            # Fallback count method
-            count = len(collection.get()['ids'])
-            print(f"✅ Brain loaded (fallback)! {count:,} chunks")
-
+            data = collection.get(limit=1)
+            count = len(data['ids']) if data and 'ids' in data else "unknown"
+        
+        print(f"✅ Brain loaded! {count:,} chunks")
+        
     except Exception as e:
-        print(f"❌ Failed to load ChromaDB: {e}")
+        print(f"❌ Brain error: {e}")
         traceback.print_exc()
         collection = None
-else:
-    print("⚠️ Using FALLBACK MODE (no brain)")
+
+if collection is None:
+    print("⚠️ FALLBACK MODE - no brain")
 
 # ============================================
-# PERSONALITY + TWIN CLASS
+# AI RESPONSE ENGINE
 # ============================================
-PERSONALITY = """You are Joshua Roy. Be CONCISE. 1-3 sentences max. Short answers. Ask questions back."""
-
 class CloudflareTwin:
     def __init__(self):
-        self.model = "@cf/meta/llama-3.1-8b-instruct"
-        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{self.model}"
+        self.url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
 
-    def search_brain(self, query):
-        if collection is None:
-            return ""
-        try:
-            results = collection.query(query_texts=[query], n_results=3)
-            return "\n".join(results['documents'][0]) if results['documents'] else ""
-        except Exception as e:
-            print(f"Search error: {e}")
-            return ""
+    def respond(self, message):
+        context = ""
+        if collection:
+            try:
+                results = collection.query(query_texts=[message], n_results=3)
+                if results and results['documents']:
+                    context = "\n".join(results['documents'][0])
+            except Exception as e:
+                print(f"Search error: {e}")
 
-    def respond(self, user_message):
-        context = self.search_brain(user_message)
-        prompt = f"""{PERSONALITY}
-Context: {context}
-User: {user_message}
-Response:"""
+        prompt = f"""You are Joshua Roy. Be very concise. 1-2 sentences max.
+Context from seminars: {context[:600]}
+User: {message}
+Joshua:"""
 
         try:
             resp = requests.post(
-                self.base_url,
+                self.url,
                 headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
-                json={"prompt": prompt, "max_tokens": 250, "temperature": 0.7},
-                timeout=25
+                json={"prompt": prompt, "max_tokens": 180, "temperature": 0.65},
+                timeout=20
             )
             if resp.status_code == 200:
-                return resp.json()["result"]["response"]
-            return f"AI Error {resp.status_code}"
-        except Exception as e:
-            return f"Error: {str(e)[:80]}"
+                return resp.json()['result']['response']
+            return "I'm here. What's on your mind?"
+        except:
+            return "Interesting point. Tell me more."
 
 twin = CloudflareTwin()
 
 # ============================================
-# TELEGRAM HANDLERS
-# ============================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hey, it's Josh. What's on your mind?")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    response = twin.respond(update.message.text)
-    await update.message.reply_text(response[:4000])
-
-# ============================================
-# FLASK HEALTH CHECK
+# TELEGRAM + FLASK
 # ============================================
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 @flask_app.route('/health')
-def health_check():
-    return "✅ Bot is alive!", 200
+def health():
+    return "OK", 200
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port, debug=False)
+# Webhook route
+@flask_app.route(f'/webhook/{TELEGRAM_TOKEN}', methods=['POST'])
+def webhook():
+    try:
+        update = Update.de_json(request.get_json(force=True), app.bot)
+        app.process_update(update)
+    except:
+        pass
+    return "OK", 200
 
 # ============================================
 # MAIN
 # ============================================
-def main():
-    print("\n🚀 Starting Joshua's AI Twin...")
-    threading.Thread(target=run_flask, daemon=True).start()
-    print("✅ Health check server running")
-
+if __name__ == "__main__":
+    print("\n🚀 Starting Joshua AI Twin...")
+    
+    # Build Application
+    global app
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.bot._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("✅ Bot is running on Render with Cloudflare AI!")
-    print(f"📊 Brain status: {'LOADED' if collection else 'FALLBACK MODE'}")
-
-    app.run_polling()
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"FATAL ERROR: {e}")
-        traceback.print_exc()
+    # Set webhook
+    if RENDER_URL:
+        webhook_url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
+        try:
+            app.bot.set_webhook(webhook_url, drop_pending_updates=True)
+            print(f"✅ Webhook set: {webhook_url}")
+        except Exception as e:
+            print(f"Webhook warning: {e}")
+    
+    port = int(os.environ.get("PORT", 8080))
+    print(f"📊 Brain: {'LOADED' if collection else 'FALLBACK'}")
+    print(f"✅ Bot live on port {port}")
+    
+    flask_app.run(host='0.0.0.0', port=port)
