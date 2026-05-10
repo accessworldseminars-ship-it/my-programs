@@ -22,10 +22,12 @@ R2_ACCESS_KEY = os.environ.get('R2_ACCESS_KEY')
 R2_SECRET_KEY = os.environ.get('R2_SECRET_KEY')
 ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'joshua-bot-brain')  # ← ADDED WITH DEFAULT
 
 print(f"Telegram Token: {'✅ SET' if TELEGRAM_TOKEN else '❌ MISSING'}", flush=True)
 print(f"R2 Keys: {'✅ SET' if R2_ACCESS_KEY and R2_SECRET_KEY else '❌ MISSING'}", flush=True)
 print(f"Account ID: {'✅ SET' if ACCOUNT_ID else '❌ MISSING'}", flush=True)
+print(f"Bucket Name: {BUCKET_NAME}", flush=True)
 
 # ============================================
 # DOWNLOAD + EXTRACT BRAIN
@@ -34,6 +36,10 @@ def download_and_extract_brain():
     if os.path.exists('./bot_brain') and os.path.exists('./bot_brain/chroma.sqlite3'):
         print("✅ Brain already exists locally")
         return True
+
+    if not BUCKET_NAME or not ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY:
+        print("⚠️ Missing R2 credentials, skipping brain download")
+        return False
 
     print("📥 Downloading bot_brain.zip from Cloudflare R2...")
     try:
@@ -88,8 +94,17 @@ if brain_loaded:
         print(f"Available collections: {[c.name for c in collections]}")
 
         collection = client.get_collection("my_brain")
-        count = collection.count()
-        print(f"✅ Brain loaded successfully! {count:,} chunks")
+        print("✅ Collection retrieved")
+
+        # Safer count
+        try:
+            count = collection.count()
+            print(f"✅ Brain loaded successfully! {count:,} chunks")
+        except:
+            # Fallback count method
+            count = len(collection.get()['ids'])
+            print(f"✅ Brain loaded (fallback)! {count:,} chunks")
+
     except Exception as e:
         print(f"❌ Failed to load ChromaDB: {e}")
         traceback.print_exc()
