@@ -1,6 +1,11 @@
-# bot.py - Deploy to Render with Cloudflare AI
 import os
+import sys
 import requests
+
+# Fix: Force numpy 1.x compatibility
+import numpy as np
+np.float_ = np.float64  # Add this line for compatibility
+
 import chromadb
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
@@ -14,7 +19,7 @@ cfat_pzV3Tdb7RzmEYwaUzfeYQX9URvXrrJzln9Jt0Jmndd758840 = os.environ.get('CLOUDFLA
 # Cloudflare AI model
 MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
-# Load your brain from Google Drive (mounted path)
+# Load your brain
 print("📚 Loading brain database...")
 brain_db = chromadb.PersistentClient(path="/app/bot_brain")
 collection = brain_db.get_collection("my_brain")
@@ -22,9 +27,7 @@ print(f"✅ Brain loaded! {collection.count():,} chunks")
 
 class CloudflareTwin:
     def __init__(self):
-        self.account_id = CLOUDFLARE_ACCOUNT_ID
-        self.api_token = CLOUDFLARE_API_TOKEN
-        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/run/{MODEL}"
+        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{MODEL}"
     
     def search_brain(self, query, n_results=3):
         try:
@@ -50,7 +53,7 @@ Concise response:"""
         try:
             response = requests.post(
                 self.base_url,
-                headers={"Authorization": f"Bearer {self.api_token}"},
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
                 json={
                     "prompt": prompt,
                     "max_tokens": 200,
