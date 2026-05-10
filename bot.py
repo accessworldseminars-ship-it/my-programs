@@ -7,9 +7,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 # Environment variables (set these in Render)
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
-CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
+8617451522:AAExnoaNqz0p3EqiFo9uxItmsK5X8uxAdIc = os.environ.get('TELEGRAM_TOKEN')
+Account id - b0df134265310242988cca17a4611c30  = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+cfat_pzV3Tdb7RzmEYwaUzfeYQX9URvXrrJzln9Jt0Jmndd758840 = os.environ.get('CLOUDFLARE_API_TOKEN')
 
 # Cloudflare AI model
 MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
