@@ -40,7 +40,7 @@ def download_brain():
     # Download zip file
     zip_path = '/tmp/chroma.zip'
     try:
-        s3.download_file(BUCKET_NAME, 'chroma.zip', zip_path)
+        s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
         print(f"✅ Downloaded {os.path.getsize(zip_path) / 1024 / 1024:.1f} MB")
     except Exception as e:
         print(f"❌ Download failed: {e}")
