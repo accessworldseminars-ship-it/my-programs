@@ -7,6 +7,7 @@ import requests
 import threading
 import shutil
 import tempfile
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -112,6 +113,25 @@ def load_brain():
 load_brain()
 
 # ============================================
+# CLEAR TELEGRAM WEBHOOK/CONFLICTS
+# ============================================
+async def clear_telegram_conflicts():
+    """Clear any existing webhook or polling sessions"""
+    try:
+        print("🧹 Clearing Telegram conflicts...", flush=True)
+        temp_app = Application.builder().token(TELEGRAM_TOKEN).build()
+        await temp_app.initialize()
+        
+        # Delete webhook and drop pending updates
+        await temp_app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook cleared", flush=True)
+        
+        await temp_app.shutdown()
+        print("✅ Conflicts cleared", flush=True)
+    except Exception as e:
+        print(f"⚠️ Conflict clearance warning: {e}", flush=True)
+
+# ============================================
 # CLOUDFLARE AI TWIN
 # ============================================
 class CloudflareTwin:
@@ -154,13 +174,26 @@ twin = CloudflareTwin()
 # HANDLERS
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hey, it's Josh. What's on your mind?")
+    brain_status = f"✅ Brain loaded: {collection.count():,} chunks" if collection else "⚠️ Running without brain"
+    await update.message.reply_text(
+        f"Hey, it's Josh. What's on your mind?\n\n{brain_status}"
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"📨 Received: {update.message.text}", flush=True)
+    print(f"📨 Received: {update.message.text[:50]}...", flush=True)
+    
+    # Send typing indicator
+    await update.message.chat.send_action(action="typing")
+    
     response = twin.respond(update.message.text)
     await update.message.reply_text(response[:4000])
     print("✅ Replied", flush=True)
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    print(f"❌ Error: {context.error}", flush=True)
+    if update and update.message:
+        await update.message.reply_text("Sorry, I hit a glitch. Try again?")
 
 # ============================================
 # FLASK HEALTH
@@ -197,15 +230,40 @@ atexit.register(cleanup)
 # MAIN - POLLING
 # ============================================
 if __name__ == "__main__":
+    if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN not set!", flush=True)
+        sys.exit(1)
+    
+    # Run conflict clearance
+    try:
+        asyncio.run(clear_telegram_conflicts())
+    except RuntimeError:
+        # If already in event loop, create new
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(clear_telegram_conflicts())
+    
+    # Build application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+    app.add_error_handler(error_handler)
+    
+    # Start Flask in background
     threading.Thread(target=run_flask, daemon=True).start()
-
+    
+    print("="*50, flush=True)
     print("🚀 Starting bot with Cloudflare AI...", flush=True)
     print(f"📊 Brain status: {'✅ LOADED' if collection else '⚠️ FALLBACK MODE'}", flush=True)
     if collection:
         print(f"📚 Memory: {collection.count():,} knowledge chunks", flush=True)
-
-    app.run_polling(drop_pending_updates=True)
+    print("="*50, flush=True)
+    
+    # Start polling with proper settings to prevent conflicts
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],  # Only listen for messages
+        stop_signals=None  # Prevent signal conflicts
+    )
