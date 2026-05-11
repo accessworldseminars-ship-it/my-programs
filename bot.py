@@ -61,8 +61,15 @@ def load_brain():
 
         zip_path = '/tmp/bot_brain.zip'
         print(f"Downloading from bucket: {BUCKET_NAME}", flush=True)
-        s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
-        print("✅ Downloaded", flush=True)
+        
+        # Try to download bot_brain.zip, fallback to small_brain.zip
+        try:
+            s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
+            print("✅ Downloaded bot_brain.zip", flush=True)
+        except:
+            print("⚠️ bot_brain.zip not found, trying small_brain.zip...", flush=True)
+            s3.download_file(BUCKET_NAME, 'small_brain.zip', zip_path)
+            print("✅ Downloaded small_brain.zip", flush=True)
 
         print("Extracting...", flush=True)
         with zipfile.ZipFile(zip_path, 'r') as z:
@@ -78,7 +85,7 @@ def load_brain():
 
         if chroma_db_path is None:
             print("❌ chroma.sqlite3 not found!", flush=True)
-            # List what we have
+            # List what we have for debugging
             for root, dirs, files in os.walk(brain_path):
                 for file in files:
                     print(f"  - {file}", flush=True)
@@ -86,23 +93,12 @@ def load_brain():
 
         print(f"🔍 ChromaDB path: {chroma_db_path}", flush=True)
 
-        # ✅ FIX #1 & #2: Import chromadb with correct 0.4.24 format
-        try:
-            from chromadb.config import Settings
-            import chromadb
-            print(f"✅ ChromaDB imported", flush=True)
-        except ImportError as e:
-            print(f"❌ ChromaDB import error: {e}", flush=True)
-            return
-
-        # ✅ FIX #2: Use Settings for ChromaDB 0.4.x format
-        client = chromadb.PersistentClient(
-            path=chroma_db_path,
-            settings=Settings(
-                allow_reset=True,
-                anonymized_telemetry=False
-            )
-        )
+        # Import chromadb for ChromaDB 1.5.9
+        import chromadb
+        print(f"✅ ChromaDB version: {chromadb.__version__}", flush=True)
+        
+        # ChromaDB 1.5.9 - NO Settings parameter!
+        client = chromadb.PersistentClient(path=chroma_db_path)
 
         available = client.list_collections()
         print(f"📚 Available collections: {[c.name for c in available]}", flush=True)
@@ -111,21 +107,34 @@ def load_brain():
             print("❌ No collections found!", flush=True)
             return
 
-        # Try to get 'my_brain' or use first available
-        try:
-            collection = client.get_collection("my_brain")
-        except:
+        # Try to get collection in order of preference
+        collection_name = None
+        for name in ['seminars', 'my_brain']:
+            try:
+                collection = client.get_collection(name)
+                collection_name = name
+                break
+            except:
+                continue
+        
+        # If neither found, use first available
+        if collection_name is None:
             collection = client.get_collection(available[0].name)
-            print(f"⚠️ Using collection: {available[0].name}", flush=True)
+            collection_name = available[0].name
+            print(f"⚠️ Using collection: {collection_name}", flush=True)
+        else:
+            print(f"✅ Using collection: {collection_name}", flush=True)
 
         print(f"✅ Brain loaded! {collection.count():,} chunks", flush=True)
 
+        # Cleanup
         os.remove(zip_path)
 
     except Exception as e:
         print(f"❌ Brain error: {e}", flush=True)
         traceback.print_exc()
 
+# Load the brain
 load_brain()
 
 # ============================================
@@ -223,7 +232,7 @@ def cleanup():
 atexit.register(cleanup)
 
 # ============================================
-# MAIN - WITH WEBHOOK CLEARING FIX
+# MAIN - WITH WEBHOOK CLEARING
 # ============================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
@@ -254,7 +263,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
     
-    # ✅ FIX #3: Clear webhook before polling to avoid "Conflict" error
+    # Clear webhook to avoid Telegram conflict
     loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     
     # Run polling with the custom loop
