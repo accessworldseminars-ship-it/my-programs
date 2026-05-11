@@ -4,9 +4,11 @@ import traceback
 import zipfile
 import boto3
 import requests
-from flask import Flask, request, jsonify
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters
+import asyncio
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import ContextTypes
 
 print("=== Joshua AI Twin Bot Starting ===", flush=True)
 
@@ -35,8 +37,12 @@ def download_brain():
         return True
     print("📥 Downloading brain from R2...")
     try:
-        s3 = boto3.client('s3', endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
-                          aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET_KEY, region_name='auto')
+        s3 = boto3.client('s3',
+            endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY,
+            aws_secret_access_key=R2_SECRET_KEY,
+            region_name='auto'
+        )
         s3.download_file(BUCKET_NAME, 'bot_brain.zip', '/tmp/brain.zip')
         print("✅ Downloaded")
 
@@ -49,7 +55,8 @@ def download_brain():
         print("✅ Extracted")
         return True
     except Exception as e:
-        print(f"❌ Brain download failed: {e}")
+        print(f"❌ Download failed: {e}")
+        traceback.print_exc()
         return False
 
 if download_brain():
@@ -60,6 +67,7 @@ if download_brain():
         print(f"✅ Brain loaded! {collection.count():,} chunks")
     except Exception as e:
         print(f"❌ Brain load error: {e}")
+        traceback.print_exc()
 
 # ============================================
 # GROK TWIN
@@ -73,12 +81,12 @@ class GrokTwin:
         if collection:
             try:
                 results = collection.query(query_texts=[message], n_results=3)
-                if results['documents']:
+                if results and results.get('documents'):
                     context = "\n\n".join(results['documents'][0])
             except:
                 pass
 
-        prompt = f"""You are Joshua Roy. Speak naturally, confidently, and concisely (1-3 sentences).
+        prompt = f"""You are Joshua Roy. Speak naturally, confidently, and concisely (1-3 sentences max).
 Context from your seminars: {context[:700]}
 User: {message}
 Joshua:"""
@@ -97,33 +105,25 @@ Joshua:"""
             )
             if resp.status_code == 200:
                 return resp.json()['choices'][0]['message']['content']
-            return "I'm here. What's going on?"
-        except:
+            return "I'm here. What's on your mind?"
+        except Exception as e:
+            print(f"Grok error: {e}")
             return "Tell me more about that."
 
 twin = GrokTwin()
 
 # ============================================
-# TELEGRAM HANDLERS
+# HANDLERS
 # ============================================
-async def start(update: Update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hey, it's Josh. What's on your mind?")
 
-async def handle_message(update: Update, context):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = twin.respond(update.message.text)
     await update.message.reply_text(response[:4000])
 
 # ============================================
-# SETUP DISPATCHER
-# ============================================
-bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, use_context=True)
-
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-# ============================================
-# FLASK APP
+# FLASK
 # ============================================
 flask_app = Flask(__name__)
 
@@ -135,25 +135,27 @@ def health():
 @flask_app.route(f'/webhook/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     try:
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, bot)
-        dispatcher.process_update(update)
-        return "OK", 200
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        asyncio.run(application.process_update(update))
     except Exception as e:
         print(f"Webhook error: {e}")
-        traceback.print_exc()
-        return "OK", 200
+    return "OK", 200
 
 # ============================================
 # MAIN
 # ============================================
 if __name__ == "__main__":
-    # Set webhook at startup
+    global application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Set webhook
     if RENDER_URL:
         webhook_url = f"{RENDER_URL.rstrip('/')}/webhook/{TELEGRAM_TOKEN}"
         try:
-            import asyncio
-            asyncio.run(bot.set_webhook(webhook_url, drop_pending_updates=True))
+            asyncio.run(application.bot.set_webhook(webhook_url, drop_pending_updates=True))
             print(f"✅ Webhook set: {webhook_url}")
         except Exception as e:
             print(f"Webhook warning: {e}")
