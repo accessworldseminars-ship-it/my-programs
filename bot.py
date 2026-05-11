@@ -4,11 +4,9 @@ import traceback
 import zipfile
 import boto3
 import requests
-import asyncio
-from flask import Flask, request
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from telegram import Update
-from telegram.ext import ContextTypes
+from flask import Flask, request, jsonify
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters
 
 print("=== Joshua AI Twin Bot Starting ===", flush=True)
 
@@ -108,12 +106,21 @@ twin = GrokTwin()
 # ============================================
 # TELEGRAM HANDLERS
 # ============================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context):
     await update.message.reply_text("Hey, it's Josh. What's on your mind?")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context):
     response = twin.respond(update.message.text)
     await update.message.reply_text(response[:4000])
+
+# ============================================
+# SETUP DISPATCHER
+# ============================================
+bot = Bot(token=TELEGRAM_TOKEN)
+dispatcher = Dispatcher(bot, None, use_context=True)
+
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ============================================
 # FLASK APP
@@ -128,27 +135,25 @@ def health():
 @flask_app.route(f'/webhook/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        asyncio.run(application.process_update(update))
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, bot)
+        dispatcher.process_update(update)
+        return "OK", 200
     except Exception as e:
         print(f"Webhook error: {e}")
-    return "OK", 200
+        traceback.print_exc()
+        return "OK", 200
 
 # ============================================
 # MAIN
 # ============================================
 if __name__ == "__main__":
-    global application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Set webhook
+    # Set webhook at startup
     if RENDER_URL:
         webhook_url = f"{RENDER_URL.rstrip('/')}/webhook/{TELEGRAM_TOKEN}"
         try:
-            asyncio.run(application.bot.set_webhook(webhook_url, drop_pending_updates=True))
+            import asyncio
+            asyncio.run(bot.set_webhook(webhook_url, drop_pending_updates=True))
             print(f"✅ Webhook set: {webhook_url}")
         except Exception as e:
             print(f"Webhook warning: {e}")
