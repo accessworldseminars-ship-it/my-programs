@@ -53,8 +53,8 @@ def load_brain():
 
         import chromadb
         client = chromadb.PersistentClient(path="./bot_brain")
-        # FIXED: Changed from "my_brain" to "seminars"
-        collection = client.get_collection("seminars")
+        # FIXED: Using correct collection name "my_brain"
+        collection = client.get_collection("my_brain")
         print(f"✅ Brain loaded! {collection.count():,} chunks", flush=True)
     except Exception as e:
         print(f"❌ Brain error: {e}", flush=True)
@@ -76,8 +76,8 @@ class CloudflareTwin:
                 if results and results.get('documents'):
                     context = "\n\n".join(results['documents'][0])
                     print(f"📚 Found {len(results['documents'][0])} chunks", flush=True)
-            except:
-                pass
+            except Exception as e:
+                print(f"Search error: {e}", flush=True)
 
         prompt = f"""You are Joshua Roy. Speak naturally, confidently, and concisely (1-3 sentences).
 Context from your seminars: {context[:700]}
@@ -94,7 +94,8 @@ Joshua:"""
             if resp.status_code == 200:
                 return resp.json()["result"]["response"]
             return "I'm here. What's on your mind?"
-        except:
+        except Exception as e:
+            print(f"AI error: {e}", flush=True)
             return "Tell me more about that."
 
 twin = CloudflareTwin()
@@ -136,4 +137,6 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
 
     print("🚀 Starting bot with Cloudflare AI...", flush=True)
+    print(f"📊 Brain status: {'LOADED' if collection else 'FALLBACK MODE'}", flush=True)
+    
     app.run_polling(drop_pending_updates=True)
