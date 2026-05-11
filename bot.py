@@ -86,15 +86,23 @@ def load_brain():
 
         print(f"🔍 ChromaDB path: {chroma_db_path}", flush=True)
 
-        # Import chromadb with error handling
+        # ✅ FIX #1 & #2: Import chromadb with correct 0.4.24 format
         try:
+            from chromadb.config import Settings
             import chromadb
             print(f"✅ ChromaDB imported", flush=True)
         except ImportError as e:
             print(f"❌ ChromaDB import error: {e}", flush=True)
             return
 
-        client = chromadb.PersistentClient(path=chroma_db_path)
+        # ✅ FIX #2: Use Settings for ChromaDB 0.4.x format
+        client = chromadb.PersistentClient(
+            path=chroma_db_path,
+            settings=Settings(
+                allow_reset=True,
+                anonymized_telemetry=False
+            )
+        )
 
         available = client.list_collections()
         print(f"📚 Available collections: {[c.name for c in available]}", flush=True)
@@ -215,7 +223,7 @@ def cleanup():
 atexit.register(cleanup)
 
 # ============================================
-# MAIN - FIXED EVENT LOOP HANDLING
+# MAIN - WITH WEBHOOK CLEARING FIX
 # ============================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
@@ -245,6 +253,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
+    
+    # ✅ FIX #3: Clear webhook before polling to avoid "Conflict" error
+    loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
     
     # Run polling with the custom loop
     app.run_polling(drop_pending_updates=True)
