@@ -16,14 +16,14 @@ print("=== Joshua AI Twin Bot Starting ===", flush=True)
 # ENVIRONMENT
 # ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-GROK_API_KEY = os.environ.get('GROK_API_KEY')
+CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
+ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 R2_ACCESS_KEY = os.environ.get('R2_ACCESS_KEY')
 R2_SECRET_KEY = os.environ.get('R2_SECRET_KEY')
-ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'joshua-bot-brain')
 
 print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Grok: {'✅' if GROK_API_KEY else '❌'}", flush=True)
+print(f"Cloudflare: {'✅' if CLOUDFLARE_API_TOKEN else '❌'}", flush=True)
 
 # ============================================
 # LOAD BRAIN
@@ -57,14 +57,16 @@ def load_brain():
         print(f"✅ Brain loaded! {collection.count():,} chunks", flush=True)
     except Exception as e:
         print(f"❌ Brain error: {e}", flush=True)
-        traceback.print_exc()
 
 load_brain()
 
 # ============================================
-# GROK TWIN
+# CLOUDFLARE AI TWIN
 # ============================================
-class GrokTwin:
+class CloudflareTwin:
+    def __init__(self):
+        self.url = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+
     def respond(self, message: str):
         context = ""
         if collection:
@@ -75,25 +77,25 @@ class GrokTwin:
             except:
                 pass
 
+        prompt = f"""You are Joshua Roy. Speak naturally, confidently, and concisely (1-3 sentences).
+Context from your seminars: {context[:700]}
+User: {message}
+Joshua:"""
+
         try:
             resp = requests.post(
-                "https://api.x.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": "grok-3-70b-8192",
-                    "messages": [{"role": "user", "content": f"You are Joshua Roy. Be concise and natural.\nContext: {context[:600]}\nUser: {message}"}],
-                    "temperature": 0.75,
-                    "max_tokens": 400
-                },
-                timeout=25
+                self.url,
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+                json={"prompt": prompt, "max_tokens": 300, "temperature": 0.7},
+                timeout=20
             )
             if resp.status_code == 200:
-                return resp.json()['choices'][0]['message']['content']
+                return resp.json()["result"]["response"]
             return "I'm here. What's on your mind?"
         except:
             return "Tell me more about that."
 
-twin = GrokTwin()
+twin = CloudflareTwin()
 
 # ============================================
 # HANDLERS
@@ -129,8 +131,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start health server
     threading.Thread(target=run_flask, daemon=True).start()
 
-    print("🚀 Starting polling mode with Grok 70B...", flush=True)
+    print("🚀 Starting bot with Cloudflare AI...", flush=True)
     app.run_polling(drop_pending_updates=True)
