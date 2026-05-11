@@ -29,7 +29,7 @@ print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Cloudflare: {'✅' if CLOUDFLARE_API_TOKEN else '❌'}", flush=True)
 
 # ============================================
-# LOAD BRAIN
+# LOAD BRAIN (WITH CHROMADB 0.4.24 COMPATIBILITY)
 # ============================================
 collection = None
 brain_temp_dir = None
@@ -54,25 +54,14 @@ def load_brain():
 
         zip_path = '/tmp/bot_brain.zip'
         s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
-        print("✅ Downloaded", flush=True)
+        print("✅ Downloaded brain.zip", flush=True)
 
-        # Extract and show full directory tree
+        # Extract
         with zipfile.ZipFile(zip_path, 'r') as z:
             z.extractall(brain_path)
-            all_files = z.namelist()
-        print(f"✅ Extracted {len(all_files)} files", flush=True)
+            print(f"✅ Extracted {len(z.namelist())} files", flush=True)
 
-        # DEBUG: Show exactly what's in brain_path
-        print(f"📁 brain_path = {brain_path}", flush=True)
-        for root, dirs, files in os.walk(brain_path):
-            level = root.replace(brain_path, '').count(os.sep)
-            indent = ' ' * 2 * level
-            print(f"{indent}{os.path.basename(root)}/", flush=True)
-            subindent = ' ' * 2 * (level + 1)
-            for file in files:
-                print(f"{subindent}{file}", flush=True)
-
-        # Find where chroma.sqlite3 actually lives
+        # Find chroma.sqlite3
         chroma_db_path = None
         for root, dirs, files in os.walk(brain_path):
             if 'chroma.sqlite3' in files:
@@ -80,12 +69,24 @@ def load_brain():
                 break
 
         if chroma_db_path is None:
-            print("❌ chroma.sqlite3 not found anywhere in extracted files!", flush=True)
+            print("❌ chroma.sqlite3 not found!", flush=True)
+            # Try to find any .sqlite3 file
+            for root, dirs, files in os.walk(brain_path):
+                for file in files:
+                    if file.endswith('.sqlite3'):
+                        chroma_db_path = root
+                        print(f"🔍 Found alternative DB: {file}", flush=True)
+                        break
+                if chroma_db_path:
+                    break
+
+        if chroma_db_path is None:
+            print("❌ No database file found!", flush=True)
             return
 
         print(f"🔍 Using ChromaDB path: {chroma_db_path}", flush=True)
 
-        # Connect to ChromaDB
+        # Connect to ChromaDB (0.4.24 compatible)
         import chromadb
         from chromadb.config import Settings
 
@@ -93,17 +94,32 @@ def load_brain():
             path=chroma_db_path,
             settings=Settings(
                 anonymized_telemetry=False,
-                allow_reset=True
+                allow_reset=True,
+                chroma_server_grpc_port=None,  # Disable gRPC for older version
+                chroma_server_http_port=None
             )
         )
 
-        # List available collections before trying to get one
+        # List available collections
         available = client.list_collections()
         print(f"📚 Available collections: {[c.name for c in available]}", flush=True)
 
-        collection = client.get_collection("my_brain")
+        # Try to get collection (handle both possible names)
+        try:
+            collection = client.get_collection("my_brain")
+        except:
+            try:
+                collection = client.get_collection("seminar_transcripts")
+            except:
+                if available:
+                    collection = client.get_collection(available[0].name)
+                    print(f"⚠️ Using first available collection: {available[0].name}", flush=True)
+                else:
+                    raise Exception("No collections found")
+
         print(f"✅ Brain loaded! {collection.count():,} chunks", flush=True)
 
+        # Clean up
         os.remove(zip_path)
 
     except Exception as e:
@@ -111,25 +127,6 @@ def load_brain():
         traceback.print_exc()
 
 load_brain()
-
-# ============================================
-# CLEAR TELEGRAM WEBHOOK/CONFLICTS
-# ============================================
-async def clear_telegram_conflicts():
-    """Clear any existing webhook or polling sessions"""
-    try:
-        print("🧹 Clearing Telegram conflicts...", flush=True)
-        temp_app = Application.builder().token(TELEGRAM_TOKEN).build()
-        await temp_app.initialize()
-        
-        # Delete webhook and drop pending updates
-        await temp_app.bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook cleared", flush=True)
-        
-        await temp_app.shutdown()
-        print("✅ Conflicts cleared", flush=True)
-    except Exception as e:
-        print(f"⚠️ Conflict clearance warning: {e}", flush=True)
 
 # ============================================
 # CLOUDFLARE AI TWIN
@@ -145,13 +142,16 @@ class CloudflareTwin:
                 results = collection.query(query_texts=[message], n_results=3)
                 if results and results.get('documents'):
                     context = "\n\n".join(results['documents'][0])
-                    print(f"📚 Found {len(results['documents'][0])} chunks", flush=True)
+                    print(f"📚 Found {len(results['documents'][0])} relevant chunks", flush=True)
             except Exception as e:
                 print(f"Search error: {e}", flush=True)
 
         prompt = f"""You are Joshua Roy. Speak naturally, confidently, and concisely (1-3 sentences).
+        
 Context from your seminars: {context[:700]}
+
 User: {message}
+
 Joshua:"""
 
         try:
@@ -162,7 +162,12 @@ Joshua:"""
                 timeout=20
             )
             if resp.status_code == 200:
-                return resp.json()["result"]["response"]
+                response = resp.json()["result"]["response"]
+                # Clean up repetition
+                if len(response) > 500:
+                    response = response[:500] + "..."
+                return response
+            print(f"AI API error: {resp.status_code}", flush=True)
             return "I'm here. What's on your mind?"
         except Exception as e:
             print(f"AI error: {e}", flush=True)
@@ -174,7 +179,7 @@ twin = CloudflareTwin()
 # HANDLERS
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    brain_status = f"✅ Brain loaded: {collection.count():,} chunks" if collection else "⚠️ Running without brain"
+    brain_status = f"✅ Brain loaded: {collection.count():,} seminar chunks" if collection else "⚠️ Running without knowledge base"
     await update.message.reply_text(
         f"Hey, it's Josh. What's on your mind?\n\n{brain_status}"
     )
@@ -196,7 +201,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, I hit a glitch. Try again?")
 
 # ============================================
-# FLASK HEALTH
+# FLASK HEALTH CHECK
 # ============================================
 flask_app = Flask(__name__)
 
@@ -205,7 +210,12 @@ flask_app = Flask(__name__)
 def health():
     status = "healthy" if collection else "degraded"
     count = collection.count() if collection else 0
-    return {"status": status, "brain_loaded": collection is not None, "chunks": count}, 200
+    return {
+        "status": status,
+        "brain_loaded": collection is not None,
+        "chunks": count,
+        "message": "Bot is alive"
+    }, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -227,31 +237,15 @@ def cleanup():
 atexit.register(cleanup)
 
 # ============================================
-# MAIN - POLLING
+# MAIN - POLLING (FIXED EVENT LOOP)
 # ============================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         print("❌ TELEGRAM_TOKEN not set!", flush=True)
         sys.exit(1)
     
-    # Run conflict clearance
-    try:
-        asyncio.run(clear_telegram_conflicts())
-    except RuntimeError:
-        # If already in event loop, create new
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(clear_telegram_conflicts())
-    
-    # Build application
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-    
-    # Start Flask in background
+    # Start Flask in background FIRST (before Telegram)
+    print("🌐 Starting Flask health server...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
     
     print("="*50, flush=True)
@@ -261,9 +255,20 @@ if __name__ == "__main__":
         print(f"📚 Memory: {collection.count():,} knowledge chunks", flush=True)
     print("="*50, flush=True)
     
-    # Start polling with proper settings to prevent conflicts
+    # Create new event loop explicitly (bypass Flask's event loop)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Build application
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
+    
+    # Start polling with proper settings
     app.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],  # Only listen for messages
-        stop_signals=None  # Prevent signal conflicts
+        allowed_updates=["message", "callback_query"]
     )
