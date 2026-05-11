@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes
 print("=== Joshua AI Twin Bot Starting ===", flush=True)
 
 # ============================================
-# ENVIRONMENT
+# ENVIRONMENT VARIABLES
 # ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
@@ -24,47 +24,92 @@ BUCKET_NAME = os.environ.get('BUCKET_NAME', 'joshua-bot-brain')
 
 print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Cloudflare: {'✅' if CLOUDFLARE_API_TOKEN else '❌'}", flush=True)
+print(f"Account ID: {'✅' if ACCOUNT_ID else '❌'}", flush=True)
 
 # ============================================
-# LOAD BRAIN - USING CORRECT COLLECTION ID
+# DOWNLOAD + EXTRACT BRAIN
+# ============================================
+def download_and_extract_brain():
+    # Check if brain already exists (files in current directory)
+    if os.path.exists('./chroma.sqlite3'):
+        print("✅ Brain already exists locally (chroma.sqlite3 found)")
+        return True
+
+    print("📥 Downloading bot_brain.zip from Cloudflare R2...")
+    try:
+        s3 = boto3.client(
+            's3',
+            endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY,
+            aws_secret_access_key=R2_SECRET_KEY,
+            region_name='auto'
+        )
+
+        zip_path = '/tmp/bot_brain.zip'
+        s3.download_file(BUCKET_NAME, 'bot_brain.zip', zip_path)
+        size_mb = os.path.getsize(zip_path) / 1024 / 1024
+        print(f"✅ Downloaded {size_mb:.1f} MB")
+
+        # Clean old files if they exist
+        if os.path.exists('./chroma.sqlite3'):
+            os.remove('./chroma.sqlite3')
+        
+        print("📦 Extracting...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall('./')  # Extract to current directory
+        
+        print("✅ Extraction complete")
+        
+        # Verify extraction
+        if os.path.exists('./chroma.sqlite3'):
+            print("✅ Brain extracted successfully (chroma.sqlite3 found)")
+            return True
+        else:
+            print("❌ chroma.sqlite3 not found after extraction")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Download/extract error: {e}")
+        traceback.print_exc()
+        return False
+
+# ============================================
+# LOAD BRAIN
 # ============================================
 collection = None
 
-def load_brain():
-    global collection
+print("\n📚 Loading brain...")
+if download_and_extract_brain():
     try:
-        print("📥 Loading brain...", flush=True)
-        
-        # Download if not exists
-        if not os.path.exists('./bot_brain/chroma.sqlite3'):
-            s3 = boto3.client('s3',
-                endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
-                aws_access_key_id=R2_ACCESS_KEY,
-                aws_secret_access_key=R2_SECRET_KEY,
-                region_name='auto'
-            )
-            s3.download_file(BUCKET_NAME, 'bot_brain.zip', '/tmp/brain.zip')
-            print("✅ Downloaded", flush=True)
-
-            if os.path.exists('./bot_brain'):
-                import shutil
-                shutil.rmtree('./bot_brain')
-            with zipfile.ZipFile('/tmp/brain.zip', 'r') as z:
-                z.extractall('./')
-            print("✅ Extracted", flush=True)
-
         import chromadb
-        client = chromadb.PersistentClient(path="./bot_brain")
+        print(f"✅ ChromaDB imported")
         
-        # FIXED: Using the actual collection ID from your brain
-        collection = client.get_collection("307af698-2f4f-45f1-9440-29e9a41e36ed")
-        print(f"✅ Brain loaded! {collection.count():,} chunks", flush=True)
+        # Connect to current directory (where chroma.sqlite3 is)
+        client = chromadb.PersistentClient(path=".")
+        print("✅ ChromaDB client created")
         
+        # List all collections
+        collections = client.list_collections()
+        print(f"Available collections: {[c.name for c in collections]}")
+        
+        if collections:
+            # Use the first collection found
+            collection = client.get_collection(collections[0].name)
+            count = collection.count()
+            print(f"✅ Brain loaded! {count:,} chunks from '{collections[0].name}'")
+        else:
+            print("❌ No collections found in brain")
+            collection = None
+            
     except Exception as e:
-        print(f"❌ Brain error: {e}", flush=True)
+        print(f"❌ Brain load error: {e}")
         traceback.print_exc()
+        collection = None
+else:
+    print("⚠️ Could not download/extract brain")
 
-load_brain()
+if collection is None:
+    print("⚠️ FALLBACK MODE - no brain loaded")
 
 # ============================================
 # CLOUDFLARE AI TWIN
@@ -161,7 +206,7 @@ if __name__ == "__main__":
     # Start Flask health check in background
     threading.Thread(target=run_flask, daemon=True).start()
 
-    print("🚀 Starting bot with Cloudflare AI...", flush=True)
+    print("\n🚀 Starting bot with Cloudflare AI...", flush=True)
     print(f"📊 Brain status: {'LOADED' if collection else 'FALLBACK MODE'}", flush=True)
     
     # Start polling
