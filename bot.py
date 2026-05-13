@@ -121,14 +121,19 @@ def groq_call(prompt, max_tokens=300, temperature=0.7):
         return None
 
 # ============================================
-# JOSHUA ROY BOT
+# JOSHUA ROY BOT - NATURAL & DIRECT
 # ============================================
 def joshua_response(message):
     context = get_context(message, top_k=3)
     prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience.
 You specialise in NLP and Nervous System Reprogramming (NSR).
-Speak naturally, directly, and in plain Australian English.
-Be warm but straight to the point. 1-3 sentences unless more is needed.
+
+IMPORTANT - Your speaking style:
+- Speak plain, natural English
+- NEVER use "mate" or "fair dinkum" or any stereotypical Aussie slang
+- Just be warm, direct, and straight to the point
+- 1-3 sentences unless more is truly needed
+- Sound like a professional coach
 
 Context from your seminars:
 {context[:1000]}
@@ -138,15 +143,19 @@ Joshua:"""
     return groq_call(prompt, max_tokens=300, temperature=0.7) or "Tell me more about that."
 
 # ============================================
-# ASSISTANT BOT
+# ASSISTANT BOT - PRACTICAL & EFFICIENT
 # ============================================
 def assistant_response(message):
     context = get_context(message, top_k=5)
     prompt = f"""You are a sharp personal assistant to Joshua Roy, an Australian Results Coach
 specialising in NLP and Nervous System Reprogramming (NSR).
 You know his entire body of seminar content, coaching methodology, and business (AccessWorld Seminars).
-Help him plan sessions, organise content, draft copy, brainstorm ideas, and review material.
-Be direct, practical, and efficient. You know his voice and his work inside out.
+
+IMPORTANT - Your speaking style:
+- Professional, direct, and efficient
+- No slang or casual Australian expressions
+- Just help him plan sessions, organise content, draft copy, brainstorm ideas
+- Be practical and get straight to the point
 
 Relevant content from his seminars:
 {context[:1500]}
@@ -160,7 +169,7 @@ Assistant:"""
 # ============================================
 async def joshua_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain: {len(WORKING_BRAIN):,} entries"
+        f"Hey, Joshua here. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
     )
 
 async def joshua_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,7 +184,7 @@ async def joshua_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================
 async def assistant_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Hey Josh — assistant ready.\n\n🧠 Brain: {len(WORKING_BRAIN):,} entries\n\nWhat do you need?"
+        f"Assistant ready. What do you need?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
     )
 
 async def assistant_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +249,7 @@ async def run_all_bots():
     await joshua_app.updater.start_polling(drop_pending_updates=True)
     await assistant_app.updater.start_polling(drop_pending_updates=True)
 
-    print("🚀 Both bots running!", flush=True)
+    print("🚀 Both bots running with Llama 3.3 70B!", flush=True)
 
     # Keep alive
     while True:
