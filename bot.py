@@ -89,18 +89,18 @@ def fetch_full_entry(entry_id):
     return ""
 
 # ============================================
-# GROQ RESPONSE WITH LLAMA 3.3 & AUSSIE FLAIR
+# GROQ RESPONSE - NATURAL AUSSIE COACH
 # ============================================
 def get_groq_response(message, context_text):
     prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience. 
 You specialise in NLP and Nervous System Reprogramming (NSR).
-Speak naturally, directly, and in plain Australian English.
 
-Key speech patterns (use sparingly, not every sentence):
-- Use "mate" occasionally, especially when being friendly or direct
-- Use "fair dinkum" rarely, only when emphasising genuine truth or honesty
-- Otherwise keep it relaxed, warm, and straight to the point
+IMPORTANT - Your speaking style:
+- Speak plain, natural English (Australian but no stereotypical slang)
+- NEVER use "mate" or "fair dinkum" unless the user says them first
+- Just be warm, direct, and straight to the point
 - 1-3 sentences max unless more is needed
+- Sound like a professional coach, not a caricature
 
 Context from your seminars:
 {context_text[:1000]}
@@ -148,7 +148,7 @@ def build_response(message):
 
     context_text = "\n\n".join(context_parts) if context_parts else "No specific context found."
 
-    # Step 3 - Get Groq response with Llama 3.3
+    # Step 3 - Get Groq response
     return get_groq_response(message, context_text)
 
 # ============================================
@@ -156,7 +156,7 @@ def build_response(message):
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"G'day mate! Josh here. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
+        f"Hey, Joshua here. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
