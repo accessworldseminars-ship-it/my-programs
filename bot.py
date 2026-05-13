@@ -89,7 +89,7 @@ def fetch_full_entry(entry_id):
     return ""
 
 # ============================================
-# GROQ RESPONSE
+# GROQ RESPONSE WITH LLAMA 3.3
 # ============================================
 def get_groq_response(message, context_text):
     prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience. 
@@ -111,7 +111,7 @@ Joshua:"""
                 "Content-Type": "application/json"
             },
             json={
-                "model": "llama-3.1-70b-versatile",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 300,
                 "temperature": 0.7
@@ -121,6 +121,7 @@ Joshua:"""
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
         print(f"❌ Groq status: {resp.status_code}", flush=True)
+        print(f"Response: {resp.text}", flush=True)
         return "Tell me more about that."
     except Exception as e:
         print(f"❌ Groq error: {e}", flush=True)
@@ -143,7 +144,7 @@ def build_response(message):
 
     context_text = "\n\n".join(context_parts) if context_parts else "No specific context found."
 
-    # Step 3 - Get Groq response
+    # Step 3 - Get Groq response with Llama 3.3
     return get_groq_response(message, context_text)
 
 # ============================================
@@ -151,7 +152,7 @@ def build_response(message):
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries"
+        f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,7 +173,7 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 @flask_app.route('/health')
 def health():
-    return {"status": "healthy", "brain_entries": len(WORKING_BRAIN)}, 200
+    return {"status": "healthy", "brain_entries": len(WORKING_BRAIN), "model": "llama-3.3-70b-versatile"}, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -193,7 +194,7 @@ if __name__ == "__main__":
     import time
     time.sleep(1)
 
-    print("🚀 Bot starting...", flush=True)
+    print("🚀 Bot starting with Llama 3.3 70B...", flush=True)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
