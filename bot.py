@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import requests
+import urllib.request
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -16,6 +17,7 @@ print("=== AccessWorld Bot Squad Starting ===", flush=True)
 # ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ASSISTANT_TELEGRAM_TOKEN = os.environ.get('ASSISTANT_TELEGRAM_TOKEN')
+CLERK_TELEGRAM_TOKEN = os.environ.get('CLERK_TELEGRAM_TOKEN')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
@@ -26,6 +28,7 @@ R2_OBJECT = "working_brain_json"
 
 print(f"Joshua Bot: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Assistant Bot: {'✅' if ASSISTANT_TELEGRAM_TOKEN else '❌'}", flush=True)
+print(f"Clerk Bot: {'✅' if CLERK_TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Groq: {'✅' if GROQ_API_KEY else '❌'}", flush=True)
 print(f"Supabase: {'✅' if SUPABASE_KEY else '❌'}", flush=True)
 
@@ -54,6 +57,35 @@ def load_working_brain():
         return []
 
 WORKING_BRAIN = load_working_brain()
+
+# ============================================
+# LOAD CLERK LINKS FROM GITHUB REPO
+# ============================================
+# CORRECTED URL - pointing to the raw file in my-programs repo
+CLERK_LINKS_URL = "https://raw.githubusercontent.com/accessworldseminars-ship-it/my-programs/main/clerk_links.json"
+
+def load_clerk_links():
+    try:
+        print(f"🔗 Loading clerk links from: {CLERK_LINKS_URL}", flush=True)
+        with urllib.request.urlopen(CLERK_LINKS_URL, timeout=15) as response:
+            links = json.loads(response.read().decode())
+            total_links = sum(len(v) for v in links.values()) if isinstance(links, dict) else 0
+            print(f"🔗 Clerk links loaded successfully: {total_links} links across {len(links)} categories", flush=True)
+            return links
+    except urllib.error.HTTPError as e:
+        print(f"❌ Clerk links HTTP error: {e.code} - {e.reason}", flush=True)
+        return {}
+    except urllib.error.URLError as e:
+        print(f"❌ Clerk links URL error: {e.reason}", flush=True)
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"❌ Clerk links JSON parse error: {e}", flush=True)
+        return {}
+    except Exception as e:
+        print(f"❌ Clerk links error: {e}", flush=True)
+        return {}
+
+CLERK_LINKS = load_clerk_links()
 
 # ============================================
 # SHARED FUNCTIONS
@@ -165,6 +197,34 @@ Assistant:"""
     return groq_call(prompt, max_tokens=500, temperature=0.5) or "Something went wrong, try again."
 
 # ============================================
+# CLERK BOT - LINK & ADMIN ASSISTANT
+# ============================================
+def clerk_response(message):
+    context = get_context(message, top_k=5)
+    
+    links_str = json.dumps(CLERK_LINKS, indent=2)
+    
+    prompt = f"""You are the Clerk — a sharp, no-nonsense personal admin assistant for Joshua Roy,
+founder of AccessWorld Seminars in Brisbane, Australia.
+
+You have access to ALL of Joshua's business links, resources, and tools below.
+When Joshua asks for a link, find the right one and give it to him instantly.
+When he asks for help with admin, drafting, planning, or organising — get it done.
+
+YOUR COMPLETE LINK LIBRARY (from my-programs/clerk_links.json):
+{links_str[:3500]}
+
+RELEVANT KNOWLEDGE:
+{context[:800]}
+
+Be direct. No fluff. If he asks for a link — give just the link and a one-line description.
+If he asks for help with a task — do it efficiently.
+
+Joshua: {message}
+Clerk:"""
+    return groq_call(prompt, max_tokens=600, temperature=0.3) or "On it — try again in a moment."
+
+# ============================================
 # TELEGRAM HANDLERS - JOSHUA BOT
 # ============================================
 async def joshua_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,6 +254,27 @@ async def assistant_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response[:4000])
     print("✅ Assistant replied", flush=True)
 
+# ============================================
+# TELEGRAM HANDLERS - CLERK BOT
+# ============================================
+async def clerk_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total_links = sum(len(v) for v in CLERK_LINKS.values()) if isinstance(CLERK_LINKS, dict) else 0
+    categories = len(CLERK_LINKS) if isinstance(CLERK_LINKS, dict) else 0
+    await update.message.reply_text(
+        f"Clerk ready, Josh.\n\n"
+        f"Ask me for any link, help with admin, drafting, planning — whatever you need.\n\n"
+        f"🔗 {total_links} links across {categories} categories\n"
+        f"📁 Source: my-programs/clerk_links.json\n"
+        f"🤖 Model: Llama 3.3 70B"
+    )
+
+async def clerk_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"📨 Clerk Bot: {update.message.text[:50]}", flush=True)
+    await update.message.chat.send_action(action="typing")
+    response = clerk_response(update.message.text)
+    await update.message.reply_text(response[:4000])
+    print("✅ Clerk replied", flush=True)
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"❌ Error: {context.error}", flush=True)
 
@@ -205,11 +286,18 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 @flask_app.route('/health')
 def health():
+    total_links = sum(len(v) for v in CLERK_LINKS.values()) if isinstance(CLERK_LINKS, dict) else 0
+    categories = len(CLERK_LINKS) if isinstance(CLERK_LINKS, dict) else 0
     return {
         "status": "healthy",
         "brain_entries": len(WORKING_BRAIN),
         "model": "llama-3.3-70b-versatile",
-        "bots": ["joshua", "assistant"]
+        "bots": ["joshua", "assistant", "clerk"],
+        "clerk": {
+            "links": total_links,
+            "categories": categories,
+            "source": "my-programs/clerk_links.json"
+        }
     }, 200
 
 def run_flask():
@@ -217,7 +305,7 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ============================================
-# RUN BOTH BOTS
+# RUN ALL THREE BOTS
 # ============================================
 async def run_all_bots():
     time.sleep(3)
@@ -234,22 +322,35 @@ async def run_all_bots():
     assistant_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, assistant_message))
     assistant_app.add_error_handler(error_handler)
 
+    # Clerk Bot
+    clerk_app = Application.builder().token(CLERK_TELEGRAM_TOKEN).build()
+    clerk_app.add_handler(CommandHandler("start", clerk_start))
+    clerk_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, clerk_message))
+    clerk_app.add_error_handler(error_handler)
+
     # Clear webhooks
     await joshua_app.bot.delete_webhook(drop_pending_updates=True)
     await assistant_app.bot.delete_webhook(drop_pending_updates=True)
+    await clerk_app.bot.delete_webhook(drop_pending_updates=True)
 
-    # Initialise both
+    # Initialise all
     await joshua_app.initialize()
     await assistant_app.initialize()
+    await clerk_app.initialize()
 
     await joshua_app.start()
     await assistant_app.start()
+    await clerk_app.start()
 
-    # Start polling both
+    # Start polling all
     await joshua_app.updater.start_polling(drop_pending_updates=True)
     await assistant_app.updater.start_polling(drop_pending_updates=True)
+    await clerk_app.updater.start_polling(drop_pending_updates=True)
 
-    print("🚀 Both bots running with Llama 3.3 70B!", flush=True)
+    print("🚀 All three bots running with Llama 3.3 70B!", flush=True)
+    print(f"   - Joshua: coaching bot", flush=True)
+    print(f"   - Assistant: planning & drafting bot", flush=True)
+    print(f"   - Clerk: links & admin bot (from my-programs/clerk_links.json)", flush=True)
 
     # Keep alive
     while True:
@@ -265,11 +366,14 @@ if __name__ == "__main__":
     if not ASSISTANT_TELEGRAM_TOKEN:
         print("❌ ASSISTANT_TELEGRAM_TOKEN not set!", flush=True)
         sys.exit(1)
+    if not CLERK_TELEGRAM_TOKEN:
+        print("❌ CLERK_TELEGRAM_TOKEN not set!", flush=True)
+        sys.exit(1)
 
     print("🌐 Starting Flask...", flush=True)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     time.sleep(1)
 
-    print("🚀 Starting both bots...", flush=True)
+    print("🚀 Starting all three bots...", flush=True)
     asyncio.run(run_all_bots())
