@@ -18,8 +18,7 @@ print("=== AccessWorld Bot Squad Starting ===", flush=True)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ASSISTANT_TELEGRAM_TOKEN = os.environ.get('ASSISTANT_TELEGRAM_TOKEN')
 CLERK_TELEGRAM_TOKEN = os.environ.get('CLERK_TELEGRAM_TOKEN')
-ACARDOOR_TELEGRAM_TOKEN = os.environ.get('ACARDOOR_TELEGRAM_TOKEN')
-TODOLIST_TELEGRAM_TOKEN = os.environ.get('TODOLIST_TELEGRAM_TOKEN')
+# REMOVED: ACARDOOR_TELEGRAM_TOKEN, TODOLIST_TELEGRAM_TOKEN
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
@@ -31,8 +30,6 @@ R2_OBJECT = "working_brain_json"
 print(f"Joshua Bot: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Assistant Bot: {'✅' if ASSISTANT_TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Clerk Bot: {'✅' if CLERK_TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Acardoor Bot: {'✅' if ACARDOOR_TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Todolist Bot: {'✅' if TODOLIST_TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Groq: {'✅' if GROQ_API_KEY else '❌'}", flush=True)
 
 # ============================================
@@ -162,17 +159,24 @@ Joshua:"""
 
 def assistant_response(message):
     context = get_context(message, top_k=5)
-    prompt = f"""You are a sharp personal assistant to Joshua Roy, founder of AccessWorld Seminars Brisbane.
-You know his entire body of work — NLP, NSR, coaching frameworks, business operations.
-Help him plan sessions, organise content, draft copy, brainstorm, and review material.
-Be direct, practical, efficient. No fluff.
+    prompt = f"""You are Joshua's personal AI assistant. You handle ALL his internal operations:
 
-Relevant knowledge:
+**YOUR CAPABILITIES:**
+1. PLANNING & DRAFTING - Session planning, content drafting, brainstorming
+2. TASK MANAGEMENT - Help prioritise tasks, track what needs doing, break big things into steps
+3. SYSTEMS IMPROVEMENT - Analyse workflows, identify inefficiencies, create step-by-step processes
+
+**STYLE:**
+- Direct, practical, efficient. No fluff.
+- Action-focused. If he asks for a task list, give him one.
+- If he asks for a system fix, analyse and suggest specific improvements.
+
+**RELEVANT KNOWLEDGE (from seminars):**
 {context[:1500]}
 
 Joshua: {message}
 Assistant:"""
-    return groq_call(prompt, max_tokens=500, temperature=0.5) or "Something went wrong, try again."
+    return groq_call(prompt, max_tokens=500, temperature=0.5) or "On it — try again in a moment."
 
 def clerk_response(message):
     context = get_context(message, top_k=3)
@@ -192,34 +196,6 @@ Joshua: {message}
 Clerk:"""
     return groq_call(prompt, max_tokens=600, temperature=0.3) or "On it — try again in a moment."
 
-def acardoor_response(message):
-    context = get_context(message, top_k=3)
-    prompt = f"""You are Acardoor — a systems improvement specialist for Joshua Roy and AccessWorld Seminars.
-Your job is to help Joshua build better systems, workflows, and processes for his business and life.
-Think like an operations expert. Identify inefficiencies, suggest improvements, create step-by-step processes.
-Be practical, specific, and direct. Focus on what can be implemented immediately.
-
-Relevant knowledge:
-{context[:1000]}
-
-Joshua: {message}
-Acardoor:"""
-    return groq_call(prompt, max_tokens=500, temperature=0.5) or "Let me think about that system — try again."
-
-def todolist_response(message):
-    context = get_context(message, top_k=2)
-    prompt = f"""You are the Productivity Bot for Joshua Roy — a no-nonsense task and productivity assistant.
-Help Joshua stay on track, prioritise tasks, manage his time, and get things done.
-You understand his business (AccessWorld Seminars), his coaching work, and his church responsibilities.
-Be direct, energetic, and action-focused. Break big tasks into small steps. Keep him moving forward.
-
-Relevant context:
-{context[:800]}
-
-Joshua: {message}
-Productivity Bot:"""
-    return groq_call(prompt, max_tokens=400, temperature=0.6) or "Let's get moving — try again."
-
 # ============================================
 # TELEGRAM HANDLERS
 # ============================================
@@ -227,10 +203,8 @@ def make_start(bot_name, brain_count):
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = {
             "joshua": f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain: {brain_count:,} entries",
-            "assistant": f"Hey Josh — assistant ready.\n\n🧠 Brain: {brain_count:,} entries\n\nWhat do you need?",
-            "clerk": f"Clerk ready, Josh.\n\n🔗 {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links loaded\n\nWhat do you need?",
-            "acardoor": f"Acardoor online, Josh.\n\n🔧 Systems improvement ready.\n\nWhat needs fixing or building?",
-            "todolist": f"Productivity bot ready, Josh.\n\n✅ Let's get things done.\n\nWhat's on your list?"
+            "assistant": f"Assistant ready, Josh.\n\n📋 Planning | ⚙️ Systems | ✅ Tasks\n\nWhat do you need?",
+            "clerk": f"Clerk ready, Josh.\n\n🔗 {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links loaded\n\nWhat do you need?"
         }
         await update.message.reply_text(messages.get(bot_name, "Ready."))
     return start
@@ -259,7 +233,7 @@ def health():
         "status": "healthy",
         "brain_entries": len(WORKING_BRAIN),
         "model": "llama-3.3-70b-versatile",
-        "bots": ["joshua", "assistant", "clerk", "acardoor", "todolist"]
+        "bots": ["joshua", "assistant", "clerk"]
     }, 200
 
 def run_flask():
@@ -272,12 +246,11 @@ def run_flask():
 async def run_all_bots():
     time.sleep(3)
 
+    # ONLY 3 BOTS: Joshua, Assistant (now with tasks + systems), Clerk
     bots = [
         (TELEGRAM_TOKEN, "joshua", joshua_response),
         (ASSISTANT_TELEGRAM_TOKEN, "assistant", assistant_response),
         (CLERK_TELEGRAM_TOKEN, "clerk", clerk_response),
-        (ACARDOOR_TELEGRAM_TOKEN, "acardoor", acardoor_response),
-        (TODOLIST_TELEGRAM_TOKEN, "todolist", todolist_response),
     ]
 
     apps = []
@@ -286,9 +259,7 @@ async def run_all_bots():
             print(f"⚠️ Skipping {name} — no token", flush=True)
             continue
         app = Application.builder().token(token).build()
-        # FIXED: No 'await' here - make_start returns a function, don't await it
         app.add_handler(CommandHandler("start", make_start(name, len(WORKING_BRAIN))))
-        # FIXED: No 'await' here - make_handler returns a function, don't await it
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, make_handler(response_func, name)))
         app.add_error_handler(error_handler)
         await app.bot.delete_webhook(drop_pending_updates=True)
@@ -298,7 +269,7 @@ async def run_all_bots():
         print(f"🚀 {name} bot running", flush=True)
         apps.append(app)
 
-    print(f"✅ {len(apps)} bots running", flush=True)
+    print(f"✅ {len(apps)} bots running (Joshua, Assistant, Clerk)", flush=True)
 
     while True:
         await asyncio.sleep(1)
