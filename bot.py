@@ -7,13 +7,15 @@ import requests
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import time
 
-print("=== Joshua AI Twin Bot Starting ===", flush=True)
+print("=== AccessWorld Bot Squad Starting ===", flush=True)
 
 # ============================================
 # ENVIRONMENT
 # ============================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+ASSISTANT_TELEGRAM_TOKEN = os.environ.get('ASSISTANT_TELEGRAM_TOKEN')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
@@ -22,7 +24,8 @@ SUPABASE_KEY = os.environ.get('SUPABASE_TOKEN')
 R2_BUCKET = "joshua-bot-brain"
 R2_OBJECT = "working_brain_json"
 
-print(f"Telegram: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
+print(f"Joshua Bot: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
+print(f"Assistant Bot: {'✅' if ASSISTANT_TELEGRAM_TOKEN else '❌'}", flush=True)
 print(f"Groq: {'✅' if GROQ_API_KEY else '❌'}", flush=True)
 print(f"Supabase: {'✅' if SUPABASE_KEY else '❌'}", flush=True)
 
@@ -42,11 +45,10 @@ def load_working_brain():
         )
         if resp.status_code == 200:
             brain = json.loads(resp.content)
-            print(f"🧠 Working brain loaded: {len(brain)} entries", flush=True)
+            print(f"🧠 Brain loaded: {len(brain)} entries", flush=True)
             return brain
-        else:
-            print(f"❌ R2 load failed: {resp.status_code}", flush=True)
-            return []
+        print(f"❌ R2 load failed: {resp.status_code}", flush=True)
+        return []
     except Exception as e:
         print(f"❌ Brain load error: {e}", flush=True)
         return []
@@ -54,7 +56,7 @@ def load_working_brain():
 WORKING_BRAIN = load_working_brain()
 
 # ============================================
-# SEARCH WORKING BRAIN (RAM)
+# SHARED FUNCTIONS
 # ============================================
 def search_working_brain(query, top_k=3):
     query_words = set(query.lower().split())
@@ -67,9 +69,6 @@ def search_working_brain(query, top_k=3):
     scored.sort(reverse=True, key=lambda x: x[0])
     return [e for _, e in scored[:top_k]]
 
-# ============================================
-# FETCH FULL ENTRY FROM SUPABASE
-# ============================================
 def fetch_full_entry(entry_id):
     try:
         resp = requests.get(
@@ -85,29 +84,19 @@ def fetch_full_entry(entry_id):
             if data:
                 return data[0].get("text", "")
     except Exception as e:
-        print(f"❌ Supabase fetch error: {e}", flush=True)
+        print(f"❌ Supabase error: {e}", flush=True)
     return ""
 
-# ============================================
-# GROQ RESPONSE - NATURAL AUSSIE COACH
-# ============================================
-def get_groq_response(message, context_text):
-    prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience. 
-You specialise in NLP and Nervous System Reprogramming (NSR).
+def get_context(message, top_k=3):
+    matches = search_working_brain(message, top_k=top_k)
+    context_parts = []
+    for match in matches:
+        full_text = fetch_full_entry(match["id"])
+        if full_text:
+            context_parts.append(full_text)
+    return "\n\n".join(context_parts) if context_parts else ""
 
-IMPORTANT - Your speaking style:
-- Speak plain, natural English (Australian but no stereotypical slang)
-- NEVER use "mate" or "fair dinkum" unless the user says them first
-- Just be warm, direct, and straight to the point
-- 1-3 sentences max unless more is needed
-- Sound like a professional coach, not a caricature
-
-Context from your seminars:
-{context_text[:1000]}
-
-User: {message}
-Joshua:"""
-
+def groq_call(prompt, max_tokens=300, temperature=0.7):
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -118,53 +107,83 @@ Joshua:"""
             json={
                 "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
-                "temperature": 0.7
+                "max_tokens": max_tokens,
+                "temperature": temperature
             },
             timeout=20
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
         print(f"❌ Groq status: {resp.status_code} - {resp.text}", flush=True)
-        return "Tell me more about that."
+        return None
     except Exception as e:
         print(f"❌ Groq error: {e}", flush=True)
-        return "I'm here. What's on your mind?"
+        return None
 
 # ============================================
-# MAIN RESPONSE PIPELINE
+# JOSHUA ROY BOT
 # ============================================
-def build_response(message):
-    # Step 1 - Search working brain in RAM
-    matches = search_working_brain(message, top_k=3)
-    print(f"📚 RAM matches: {len(matches)}", flush=True)
+def joshua_response(message):
+    context = get_context(message, top_k=3)
+    prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience.
+You specialise in NLP and Nervous System Reprogramming (NSR).
+Speak naturally, directly, and in plain Australian English.
+Be warm but straight to the point. 1-3 sentences unless more is needed.
 
-    # Step 2 - Fetch full entries from Supabase
-    context_parts = []
-    for match in matches:
-        full_text = fetch_full_entry(match["id"])
-        if full_text:
-            context_parts.append(full_text)
+Context from your seminars:
+{context[:1000]}
 
-    context_text = "\n\n".join(context_parts) if context_parts else "No specific context found."
-
-    # Step 3 - Get Groq response
-    return get_groq_response(message, context_text)
+User: {message}
+Joshua:"""
+    return groq_call(prompt, max_tokens=300, temperature=0.7) or "Tell me more about that."
 
 # ============================================
-# TELEGRAM HANDLERS
+# ASSISTANT BOT
 # ============================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def assistant_response(message):
+    context = get_context(message, top_k=5)
+    prompt = f"""You are a sharp personal assistant to Joshua Roy, an Australian Results Coach
+specialising in NLP and Nervous System Reprogramming (NSR).
+You know his entire body of seminar content, coaching methodology, and business (AccessWorld Seminars).
+Help him plan sessions, organise content, draft copy, brainstorm ideas, and review material.
+Be direct, practical, and efficient. You know his voice and his work inside out.
+
+Relevant content from his seminars:
+{context[:1500]}
+
+Joshua: {message}
+Assistant:"""
+    return groq_call(prompt, max_tokens=500, temperature=0.5) or "Something went wrong, try again."
+
+# ============================================
+# TELEGRAM HANDLERS - JOSHUA BOT
+# ============================================
+async def joshua_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Hey, Joshua here. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
+        f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain: {len(WORKING_BRAIN):,} entries"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"📨 {update.message.text[:50]}", flush=True)
+async def joshua_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"📨 Joshua Bot: {update.message.text[:50]}", flush=True)
     await update.message.chat.send_action(action="typing")
-    response = build_response(update.message.text)
+    response = joshua_response(update.message.text)
     await update.message.reply_text(response[:4000])
-    print("✅ Replied", flush=True)
+    print("✅ Joshua replied", flush=True)
+
+# ============================================
+# TELEGRAM HANDLERS - ASSISTANT BOT
+# ============================================
+async def assistant_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Hey Josh — assistant ready.\n\n🧠 Brain: {len(WORKING_BRAIN):,} entries\n\nWhat do you need?"
+    )
+
+async def assistant_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"📨 Assistant Bot: {update.message.text[:50]}", flush=True)
+    await update.message.chat.send_action(action="typing")
+    response = assistant_response(update.message.text)
+    await update.message.reply_text(response[:4000])
+    print("✅ Assistant replied", flush=True)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"❌ Error: {context.error}", flush=True)
@@ -177,11 +196,55 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 @flask_app.route('/health')
 def health():
-    return {"status": "healthy", "brain_entries": len(WORKING_BRAIN), "model": "llama-3.3-70b-versatile"}, 200
+    return {
+        "status": "healthy",
+        "brain_entries": len(WORKING_BRAIN),
+        "model": "llama-3.3-70b-versatile",
+        "bots": ["joshua", "assistant"]
+    }, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ============================================
+# RUN BOTH BOTS
+# ============================================
+async def run_all_bots():
+    time.sleep(3)
+
+    # Joshua Bot
+    joshua_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    joshua_app.add_handler(CommandHandler("start", joshua_start))
+    joshua_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, joshua_message))
+    joshua_app.add_error_handler(error_handler)
+
+    # Assistant Bot
+    assistant_app = Application.builder().token(ASSISTANT_TELEGRAM_TOKEN).build()
+    assistant_app.add_handler(CommandHandler("start", assistant_start))
+    assistant_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, assistant_message))
+    assistant_app.add_error_handler(error_handler)
+
+    # Clear webhooks
+    await joshua_app.bot.delete_webhook(drop_pending_updates=True)
+    await assistant_app.bot.delete_webhook(drop_pending_updates=True)
+
+    # Initialise both
+    await joshua_app.initialize()
+    await assistant_app.initialize()
+
+    await joshua_app.start()
+    await assistant_app.start()
+
+    # Start polling both
+    await joshua_app.updater.start_polling(drop_pending_updates=True)
+    await assistant_app.updater.start_polling(drop_pending_updates=True)
+
+    print("🚀 Both bots running!", flush=True)
+
+    # Keep alive
+    while True:
+        await asyncio.sleep(1)
 
 # ============================================
 # MAIN
@@ -190,23 +253,14 @@ if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         print("❌ TELEGRAM_TOKEN not set!", flush=True)
         sys.exit(1)
+    if not ASSISTANT_TELEGRAM_TOKEN:
+        print("❌ ASSISTANT_TELEGRAM_TOKEN not set!", flush=True)
+        sys.exit(1)
 
     print("🌐 Starting Flask...", flush=True)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
-    import time
     time.sleep(1)
 
-    print("🚀 Bot starting with Llama 3.3 70B...", flush=True)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    loop.run_until_complete(app.bot.delete_webhook(drop_pending_updates=True))
-    app.run_polling(drop_pending_updates=True)
+    print("🚀 Starting both bots...", flush=True)
+    asyncio.run(run_all_bots())
