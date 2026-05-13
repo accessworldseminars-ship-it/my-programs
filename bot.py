@@ -89,13 +89,18 @@ def fetch_full_entry(entry_id):
     return ""
 
 # ============================================
-# GROQ RESPONSE WITH LLAMA 3.3
+# GROQ RESPONSE WITH LLAMA 3.3 & AUSSIE FLAIR
 # ============================================
 def get_groq_response(message, context_text):
     prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience. 
 You specialise in NLP and Nervous System Reprogramming (NSR).
-Speak naturally, directly, and in plain Australian English. 
-Be warm but straight to the point. 1-3 sentences max unless more is needed.
+Speak naturally, directly, and in plain Australian English.
+
+Key speech patterns (use sparingly, not every sentence):
+- Use "mate" occasionally, especially when being friendly or direct
+- Use "fair dinkum" rarely, only when emphasising genuine truth or honesty
+- Otherwise keep it relaxed, warm, and straight to the point
+- 1-3 sentences max unless more is needed
 
 Context from your seminars:
 {context_text[:1000]}
@@ -120,8 +125,7 @@ Joshua:"""
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
-        print(f"❌ Groq status: {resp.status_code}", flush=True)
-        print(f"Response: {resp.text}", flush=True)
+        print(f"❌ Groq status: {resp.status_code} - {resp.text}", flush=True)
         return "Tell me more about that."
     except Exception as e:
         print(f"❌ Groq error: {e}", flush=True)
@@ -152,7 +156,7 @@ def build_response(message):
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Hey, it's Josh. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
+        f"G'day mate! Josh here. What's on your mind?\n\n🧠 Brain loaded: {len(WORKING_BRAIN):,} entries\n🤖 Model: Llama 3.3 70B"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
