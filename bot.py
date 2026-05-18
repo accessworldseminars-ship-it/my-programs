@@ -5,12 +5,13 @@ import asyncio
 import threading
 import requests
 import time
+import uuid
 import urllib.request
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-print("=== AccessWorld Bot Squad Starting (Advanced Memory) ===", flush=True)
+print("=== AccessWorld Bot Squad Starting ===", flush=True)
 
 # ============================================
 # ENVIRONMENT
@@ -23,35 +24,46 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
 
-SUPABASE_URL = "https://mldzkzrljaxudemfpbkh.supabase.co"
+SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://mldzkzrljaxudemfpbkh.supabase.co')
 SUPABASE_KEY = os.environ.get('SUPABASE_TOKEN')
 
-# R2 Configuration
-R2_BUCKET = "joshua-bot-brain"
-R2_OBJECT = "working_brain_json"
-TOPICS_OBJECT = "brain_topics.json"
-SUMMARY_OBJECT = "brain_summaries.json"
-
-# Per-bot workspace buckets
+# ============================================
+# PER-BOT R2 BUCKETS
+# Each bot has its OWN memory bucket — nothing is shared
+# ============================================
 BOT_BUCKETS = {
-    "joshua": "joshuaroy",
+    "joshua":    "joshuaroy",
     "assistant": "joshua1assistant",
-    "clerk": "clerk",
+    "clerk":     "clerk",
 }
 
-# Memory configuration
 MEMORY_EXPIRY_DAYS = 90
 AUTO_SUMMARY_THRESHOLD = 50
 
-print(f"Joshua Bot: {'✅' if TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Assistant Bot: {'✅' if ASSISTANT_TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Clerk Bot: {'✅' if CLERK_TELEGRAM_TOKEN else '❌'}", flush=True)
-print(f"Groq: {'✅' if GROQ_API_KEY else '❌'}", flush=True)
+# ============================================
+# IN-MEMORY STORES (per-bot, loaded at startup)
+# ============================================
+# Structure: { bot_name: [memory_entry, ...] }
+BOT_MEMORIES = {
+    "joshua":    [],
+    "assistant": [],
+    "clerk":     [],
+}
+
+# Conversation history per user per bot
+# Structure: { bot_name: { user_id: [{"role": ..., "content": ...}, ...] } }
+CONVERSATION_HISTORY = {
+    "joshua":    {},
+    "assistant": {},
+    "clerk":     {},
+}
+
+MAX_HISTORY_TURNS = 20  # keep last 20 exchanges per user
 
 # ============================================
 # R2 HELPERS
 # ============================================
-def r2_get_object(bucket, key):
+def r2_get(bucket, key):
     try:
         url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/r2/buckets/{bucket}/objects/{key}"
         resp = requests.get(url, headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"}, timeout=30)
@@ -59,289 +71,280 @@ def r2_get_object(bucket, key):
             return resp.content
         return None
     except Exception as e:
-        print(f"❌ R2 get error: {e}", flush=True)
+        print(f"❌ R2 get error [{bucket}/{key}]: {e}", flush=True)
         return None
 
-def r2_put_object(bucket, key, data_bytes, content_type="application/json"):
+def r2_put(bucket, key, data):
     try:
         url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/r2/buckets/{bucket}/objects/{key}"
-        resp = requests.put(url, headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": content_type}, data=data_bytes, timeout=30)
+        resp = requests.put(
+            url,
+            headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"},
+            data=json.dumps(data, indent=2).encode("utf-8"),
+            timeout=30
+        )
         if resp.status_code not in (200, 204):
-            print(f"❌ R2 put failed: {resp.status_code}", flush=True)
+            print(f"❌ R2 put failed [{bucket}/{key}]: {resp.status_code}", flush=True)
     except Exception as e:
-        print(f"❌ R2 put error: {e}", flush=True)
+        print(f"❌ R2 put error [{bucket}/{key}]: {e}", flush=True)
 
 # ============================================
-# MEMORY STRUCTURES
+# LOAD / SAVE PER-BOT MEMORIES
 # ============================================
-WORKING_BRAIN = []
-BRAIN_TOPICS = {}
-BRAIN_SUMMARIES = []
-
-def load_working_brain():
-    global WORKING_BRAIN, BRAIN_TOPICS, BRAIN_SUMMARIES
-    try:
-        raw = r2_get_object(R2_BUCKET, R2_OBJECT)
-        if raw:
-            WORKING_BRAIN = json.loads(raw)
-            print(f"🧠 Brain loaded: {len(WORKING_BRAIN)} entries", flush=True)
-        
-        topics_raw = r2_get_object(R2_BUCKET, TOPICS_OBJECT)
-        if topics_raw:
-            BRAIN_TOPICS = json.loads(topics_raw)
-            print(f"📂 Topics loaded: {len(BRAIN_TOPICS)} categories", flush=True)
-        
-        summaries_raw = r2_get_object(R2_BUCKET, SUMMARY_OBJECT)
-        if summaries_raw:
-            BRAIN_SUMMARIES = json.loads(summaries_raw)
-            print(f"📝 Summaries loaded: {len(BRAIN_SUMMARIES)}", flush=True)
-    except Exception as e:
-        print(f"❌ Brain error: {e}", flush=True)
-
-def save_working_brain():
-    try:
-        r2_put_object(R2_BUCKET, R2_OBJECT, json.dumps(WORKING_BRAIN, indent=2).encode("utf-8"))
-        r2_put_object(R2_BUCKET, TOPICS_OBJECT, json.dumps(BRAIN_TOPICS, indent=2).encode("utf-8"))
-        r2_put_object(R2_BUCKET, SUMMARY_OBJECT, json.dumps(BRAIN_SUMMARIES, indent=2).encode("utf-8"))
-        print(f"💾 Memory saved: {len(WORKING_BRAIN)} entries", flush=True)
-    except Exception as e:
-        print(f"❌ Save error: {e}", flush=True)
-
-# ⭐ CRITICAL: Load brain BEFORE bots start
-load_working_brain()
-
-# ============================================
-# SEMANTIC SEARCH
-# ============================================
-def semantic_search(query, top_k=5):
-    query_words = set(query.lower().split())
-    scored = []
-    
-    for entry in WORKING_BRAIN:
-        summary = entry.get("summary", "").lower()
-        text = entry.get("text", "").lower()
-        combined = f"{summary} {text}"
-        
-        score = sum(1 for word in query_words if word in combined)
-        
-        for topic in entry.get("topics", []):
-            if topic in query.lower():
-                score += 3
-        
-        if score > 0:
-            scored.append((score, entry))
-    
-    scored.sort(reverse=True, key=lambda x: x[0])
-    return [e for _, e in scored[:top_k]]
-
-# ============================================
-# AUTO-SUMMARIZATION
-# ============================================
-def auto_summarize():
-    if len(WORKING_BRAIN) > 0 and len(WORKING_BRAIN) % AUTO_SUMMARY_THRESHOLD == 0:
-        print(f"📝 Auto-summarizing...", flush=True)
-        recent = WORKING_BRAIN[-AUTO_SUMMARY_THRESHOLD:]
-        summary_text = "\n".join([m.get("summary", "") for m in recent])
-        
-        prompt = f"Summarize these key memories into 3-5 bullet points:\n\n{summary_text}\n\nKey themes:"
-        
+def load_bot_memories(bot_name):
+    bucket = BOT_BUCKETS[bot_name]
+    raw = r2_get(bucket, "memories.json")
+    if raw:
         try:
-            resp = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300},
-                timeout=20
-            )
-            if resp.status_code == 200:
-                summary = resp.json()["choices"][0]["message"]["content"].strip()
-                BRAIN_SUMMARIES.append({
-                    "timestamp": int(time.time()),
-                    "memory_range": f"{len(WORKING_BRAIN) - AUTO_SUMMARY_THRESHOLD + 1}-{len(WORKING_BRAIN)}",
-                    "summary": summary
-                })
-                save_working_brain()
+            BOT_MEMORIES[bot_name] = json.loads(raw)
+            print(f"🧠 {bot_name}: {len(BOT_MEMORIES[bot_name])} memories loaded", flush=True)
         except Exception as e:
-            print(f"❌ Auto-summarize error: {e}", flush=True)
+            print(f"❌ {bot_name} memory parse error: {e}", flush=True)
+            BOT_MEMORIES[bot_name] = []
+    else:
+        BOT_MEMORIES[bot_name] = []
+        print(f"🧠 {bot_name}: no existing memories", flush=True)
+
+def save_bot_memories(bot_name):
+    bucket = BOT_BUCKETS[bot_name]
+    r2_put(bucket, "memories.json", BOT_MEMORIES[bot_name])
+    print(f"💾 {bot_name}: {len(BOT_MEMORIES[bot_name])} memories saved", flush=True)
+
+def load_all_memories():
+    for bot_name in BOT_BUCKETS:
+        load_bot_memories(bot_name)
 
 # ============================================
-# TOPIC EXTRACTION
+# SUPABASE SEARCH (Big Brain — read only)
 # ============================================
-def extract_topics(text):
-    prompt = f"Extract 1-3 main topics from this text. Return ONLY comma-separated keywords:\n\nText: {text[:300]}\n\nTopics:"
+def supabase_search(query, limit=3):
+    """Full-text search in Supabase for seminar content."""
+    if not SUPABASE_KEY or not SUPABASE_URL:
+        return []
     try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 50, "temperature": 0.3},
+        # Use Supabase full-text search on your existing table
+        # Adjust 'seminar_content' and column names to match your actual table
+        url = f"{SUPABASE_URL}/rest/v1/seminar_content"
+        resp = requests.get(
+            url,
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+            },
+            params={
+                "select": "content,source",
+                "content": f"fts.websearch_to_tsquery.{query}",
+                "limit": limit,
+            },
             timeout=10
         )
         if resp.status_code == 200:
-            topics_text = resp.json()["choices"][0]["message"]["content"].strip()
-            return [t.strip().lower() for t in topics_text.split(",")[:3]]
+            results = resp.json()
+            return [r.get("content", "") for r in results if r.get("content")]
+        else:
+            print(f"⚠️ Supabase search returned {resp.status_code}", flush=True)
+            return []
     except Exception as e:
-        print(f"❌ Topic extraction error: {e}", flush=True)
-    return ["general"]
-
-def add_to_topics(memory_id, topics):
-    for topic in topics:
-        if topic not in BRAIN_TOPICS:
-            BRAIN_TOPICS[topic] = []
-        if memory_id not in BRAIN_TOPICS[topic]:
-            BRAIN_TOPICS[topic].append(memory_id)
+        print(f"❌ Supabase search error: {e}", flush=True)
+        return []
 
 # ============================================
-# MEMORY EXPIRY
+# SEMANTIC SEARCH (per-bot)
 # ============================================
-def cleanup_expired_memories():
-    expiry_time = int(time.time()) - (MEMORY_EXPIRY_DAYS * 24 * 60 * 60)
-    original_count = len(WORKING_BRAIN)
-    
-    WORKING_BRAIN[:] = [m for m in WORKING_BRAIN if m.get("ts", 0) >= expiry_time]
-    
-    for topic in list(BRAIN_TOPICS.keys()):
-        BRAIN_TOPICS[topic] = [mid for mid in BRAIN_TOPICS[topic] 
-                               if any(m.get("id") == mid for m in WORKING_BRAIN)]
-        if not BRAIN_TOPICS[topic]:
-            del BRAIN_TOPICS[topic]
-    
-    if len(WORKING_BRAIN) < original_count:
-        save_working_brain()
-        return original_count - len(WORKING_BRAIN)
-    return 0
+def semantic_search(query, bot_name, top_k=5):
+    query_words = set(query.lower().split())
+    scored = []
+    for entry in BOT_MEMORIES[bot_name]:
+        text = (entry.get("summary", "") + " " + entry.get("text", "")).lower()
+        score = sum(1 for word in query_words if word in text)
+        if score > 0:
+            scored.append((score, entry))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return [e for _, e in scored[:top_k]]
+
+def get_context(message, bot_name, top_k=3):
+    # Search bot's own R2 memories
+    local_matches = semantic_search(message, bot_name, top_k=top_k)
+    local_text = "\n\n".join([m.get("text", "") for m in local_matches])
+
+    # Also search Supabase Big Brain for seminar content
+    supabase_matches = supabase_search(message, limit=2)
+    supabase_text = "\n\n".join(supabase_matches)
+
+    combined = []
+    if local_text:
+        combined.append(f"[Your memories]\n{local_text}")
+    if supabase_text:
+        combined.append(f"[Seminar content]\n{supabase_text}")
+    return "\n\n".join(combined)
 
 # ============================================
-# AUTO-RECALL
+# CONVERSATION HISTORY MANAGEMENT
 # ============================================
-def auto_recall(message):
-    text = message.lower().strip()
-    if len(text) < 10 or text.startswith("/"):
-        return None
-    
-    recall_keywords = ["what", "how", "when", "where", "who", "why", "tell", "explain", "describe"]
-    is_question = any(text.startswith(kw) for kw in recall_keywords) or "?" in text
-    
-    if is_question:
-        relevant = semantic_search(text, top_k=3)
-        if relevant:
-            msg = "💡 **Related memory:**\n\n"
-            for mem in relevant[:1]:
-                msg += mem.get("summary", "")
-            return msg
-    return None
+def get_history(bot_name, user_id):
+    return CONVERSATION_HISTORY[bot_name].get(str(user_id), [])
+
+def add_to_history(bot_name, user_id, role, content):
+    uid = str(user_id)
+    if uid not in CONVERSATION_HISTORY[bot_name]:
+        CONVERSATION_HISTORY[bot_name][uid] = []
+    CONVERSATION_HISTORY[bot_name][uid].append({"role": role, "content": content})
+    # Trim to last MAX_HISTORY_TURNS exchanges (each exchange = 2 messages)
+    if len(CONVERSATION_HISTORY[bot_name][uid]) > MAX_HISTORY_TURNS * 2:
+        CONVERSATION_HISTORY[bot_name][uid] = CONVERSATION_HISTORY[bot_name][uid][-(MAX_HISTORY_TURNS * 2):]
+
+def clear_history(bot_name, user_id):
+    CONVERSATION_HISTORY[bot_name][str(user_id)] = []
 
 # ============================================
-# PER-BOT WORKSPACE
+# MEMORY STORE / RECALL / DELETE
 # ============================================
-def load_workspace(bucket):
-    workspace = {}
-    files = ["habits.json", "patterns.json", "workflows.json", "temp_prefs.json", "ongoing_projects.json"]
-    for f in files:
-        key = f"workspace/{f}"
-        raw = r2_get_object(bucket, key)
-        workspace[f] = json.loads(raw) if raw else []
-    return workspace
+def store_memory(text, bot_name):
+    """Store a memory in this bot's private bucket only."""
+    memory_id = str(uuid.uuid4())[:8]  # stable unique ID, not an index
+    entry = {
+        "id": memory_id,
+        "summary": text[:160],
+        "text": text,
+        "bot": bot_name,
+        "ts": int(time.time()),
+    }
+    BOT_MEMORIES[bot_name].append(entry)
+    save_bot_memories(bot_name)
+    return memory_id
 
-def save_workspace(bucket, workspace):
-    for filename, data in workspace.items():
-        key = f"workspace/{filename}"
-        r2_put_object(bucket, key, json.dumps(data, indent=2).encode("utf-8"))
-
-def route_workspace_memory(message, workspace):
-    text = message.lower()
-    if "every day" in text or "i usually" in text:
-        workspace["habits.json"].append({"text": message, "ts": int(time.time())})
-        return "habits"
-    if "i always" in text or "i tend to" in text:
-        workspace["patterns.json"].append({"text": message, "ts": int(time.time())})
-        return "patterns"
-    if "step" in text or "process" in text or "workflow" in text:
-        workspace["workflows.json"].append({"text": message, "ts": int(time.time())})
-        return "workflows"
-    if "for now" in text or "temporary" in text:
-        workspace["temp_prefs.json"].append({"text": message, "ts": int(time.time())})
-        return "temp_prefs"
-    if "working on" in text or "project" in text:
-        workspace["ongoing_projects.json"].append({"text": message, "ts": int(time.time())})
-        return "ongoing_projects"
-    return None
-
-# ============================================
-# STORE & RECALL
-# ============================================
-def store_in_working_brain(message, bot_name):
-    text = message.lower().strip()
-    
-    is_remember_command = text.startswith("/remember")
-    is_remember_phrase = any(phrase in text for phrase in ["remember this", "remember that", "save this", "note this", "don't forget"])
-    
-    if is_remember_command or is_remember_phrase:
-        content = message
-        if is_remember_command:
-            content = content.replace("/remember", "").strip()
-        for phrase in ["remember this", "remember that", "save this", "note this", "don't forget"]:
-            content = content.replace(phrase, "").strip()
-        if not content:
-            content = message
-        
-        topics = extract_topics(content)
-        memory_id = len(WORKING_BRAIN) + 1
-        
-        WORKING_BRAIN.append({
-            "id": memory_id,
-            "summary": content[:160],
-            "text": content,
-            "source_bot": bot_name,
-            "ts": int(time.time()),
-            "topics": topics,
-            "access_count": 0
-        })
-        add_to_topics(memory_id, topics)
-        save_working_brain()
-        auto_summarize()
-        return content
+def delete_memory(memory_id, bot_name):
+    """Delete by stable UUID, not by index."""
+    original = len(BOT_MEMORIES[bot_name])
+    BOT_MEMORIES[bot_name] = [m for m in BOT_MEMORIES[bot_name] if m.get("id") != memory_id]
+    if len(BOT_MEMORIES[bot_name]) < original:
+        save_bot_memories(bot_name)
+        return True
     return False
 
-def recall_from_working_brain(message, bot_name):
-    text = message.lower().strip()
-    
-    is_recall_command = text.startswith(("/recall", "/search", "/find"))
-    is_ask_phrase = any(phrase in text for phrase in ["tell me", "remind me", "what do you know about", "do you remember"])
-    
-    if not (is_recall_command or is_ask_phrase):
-        return None
-    
-    query = message
-    for cmd in ["/recall", "/search", "/find"]:
-        query = query.replace(cmd, "").strip()
-    for phrase in ["tell me", "remind me", "what do you know about", "do you remember"]:
-        query = query.replace(phrase, "").strip()
-    query = query.replace("?", "").strip()
-    
-    if not query:
-        recent = WORKING_BRAIN[-5:] if WORKING_BRAIN else []
-        if not recent:
-            return "📭 No memories stored yet."
-        msg = "📋 **Recent memories:**\n\n"
-        for i, m in enumerate(recent, 1):
-            msg += f"{i}. {m.get('summary', '')}\n"
-        return msg
-    
-    matches = semantic_search(query, top_k=5)
-    if not matches:
-        return f"🔍 Nothing found about '{query}'."
-    
-    for m in matches:
-        m["access_count"] = m.get("access_count", 0) + 1
-    save_working_brain()
-    
-    msg = f"🔍 **Found {len(matches)} memory(ies):**\n\n"
-    for i, m in enumerate(matches, 1):
-        msg += f"{i}. {m.get('summary', '')}\n\n"
-    return msg
+def is_remember_intent(text):
+    text = text.lower().strip()
+    return (
+        text.startswith("/remember") or
+        any(p in text for p in ["remember this", "remember that", "save this", "note this", "don't forget"])
+    )
 
-def get_context(message, top_k=3):
-    matches = semantic_search(message, top_k=top_k)
-    return "\n\n".join([m.get("text", "") for m in matches]) if matches else ""
+def is_recall_intent(text):
+    text = text.lower().strip()
+    return (
+        text.startswith(("/recall", "/search", "/find")) or
+        any(p in text for p in ["tell me", "remind me", "what do you know about", "do you remember"])
+    )
+
+def extract_memory_content(text):
+    """Strip command/trigger phrases, return just the content to remember."""
+    result = text
+    for cmd in ["/remember"]:
+        result = result.replace(cmd, "")
+    for phrase in ["remember this", "remember that", "save this", "note this", "don't forget"]:
+        result = result.replace(phrase, "")
+    return result.strip()
+
+# ============================================
+# CLEANUP
+# ============================================
+def cleanup_expired_memories(bot_name):
+    expiry = int(time.time()) - (MEMORY_EXPIRY_DAYS * 24 * 3600)
+    original = len(BOT_MEMORIES[bot_name])
+    BOT_MEMORIES[bot_name] = [m for m in BOT_MEMORIES[bot_name] if m.get("ts", 0) >= expiry]
+    removed = original - len(BOT_MEMORIES[bot_name])
+    if removed:
+        save_bot_memories(bot_name)
+    return removed
+
+# ============================================
+# GROQ CALL (with conversation history)
+# ============================================
+def groq_call(system_prompt, conversation_history, max_tokens=400, temperature=0.7):
+    """
+    Pass the full conversation history so Groq has context across turns.
+    conversation_history: list of {"role": "user"/"assistant", "content": "..."}
+    """
+    try:
+        messages = [{"role": "system", "content": system_prompt}] + conversation_history
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            timeout=25
+        )
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"❌ Groq error: {resp.status_code} {resp.text[:200]}", flush=True)
+        return None
+    except Exception as e:
+        print(f"❌ Groq exception: {e}", flush=True)
+        return None
+
+# ============================================
+# BOT SYSTEM PROMPTS
+# ============================================
+def joshua_system(context):
+    return f"""You are Joshua Roy, an Australian Results Coach with 12+ years experience in NLP and Nervous System Reprogramming (NSR).
+
+VOICE:
+- Modern Brisbane Australian — grounded, direct, warm
+- Never "G'day", "cobber", "bogan" or cartoon Aussie
+- "mate" rarely, not every message
+- Professional coach tone with real-world clarity
+- Speak from genuine experience
+
+EXPERTISE:
+- NLP (Neuro-Linguistic Programming)
+- Nervous System Reprogramming (NSR)
+- Results coaching — practical, no fluff
+
+RULES:
+- 1-4 sentences unless deeper explanation is needed
+- Direct and actionable
+- Remember the full conversation — refer back to earlier points naturally
+
+RELEVANT CONTEXT FROM YOUR SEMINARS AND MEMORY:
+{context[:1500] if context else "None available."}"""
+
+def assistant_system(context):
+    return f"""You are Joshua Roy's personal AI assistant. You handle his internal operations.
+
+STYLE:
+- Direct, practical, efficient — no fluff
+- Action-focused: tasks, planning, systems
+- Australian English
+- You remember the full conversation — refer back naturally
+
+CAPABILITIES:
+- Planning & drafting
+- Task management
+- Systems improvement
+- Research and analysis
+
+RELEVANT CONTEXT:
+{context[:1500] if context else "None available."}"""
+
+def clerk_system(context, links_str):
+    return f"""You are the Clerk — no-nonsense admin assistant for Joshua Roy.
+
+RESPONSIBILITIES:
+- Find and provide links instantly from the library below
+- Admin help: drafting, planning, organising
+- Direct, no fluff, one-line descriptions with links
+- You remember the full conversation — refer back naturally
+
+LINK LIBRARY:
+{links_str}
+
+RELEVANT CONTEXT:
+{context[:800] if context else "None available."}"""
 
 # ============================================
 # LOAD CLERK LINKS
@@ -358,223 +361,140 @@ def load_clerk_links():
 CLERK_LINKS = load_clerk_links()
 
 # ============================================
-# GROQ CALL
-# ============================================
-def groq_call(prompt, max_tokens=300, temperature=0.7):
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": temperature},
-            timeout=20
-        )
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        return None
-    except Exception as e:
-        print(f"❌ Groq error: {e}", flush=True)
-        return None
-
-# ============================================
-# BOT RESPONSES
-# ============================================
-def joshua_response(message):
-    context = get_context(message, top_k=3)
-    
-    prompt = f"""You are Joshua Roy, an Australian Results Coach with 12 years experience in NLP and Nervous System Reprogramming (NSR).
-
-**YOUR VOICE GUIDELINES (CRITICAL):**
-- Modern Australian English (Brisbane city, not outback/country)
-- Natural, grounded, direct — no cartoon Aussie stereotypes
-- NEVER use: "G'day", "how ya goin'", "cobber", "bogan", or exaggerated slang
-- Use "mate" very rarely (max 1-2 times per week of conversation, not every message)
-- Use "ya" almost never (keep it 98% professional)
-- Professional coach tone with real-world clarity
-- Warm but not cheesy — conversational but not slangy
-- Sound like a normal Australian who lives in Brisbane and runs a serious coaching business
-- You've been through hard times yourself — speak with genuine experience
-
-**YOUR EXPERTISE:**
-- NLP (Neuro-Linguistic Programming)
-- Nervous System Reprogramming (NSR)
-- Results coaching — practical, actionable, no fluff
-
-**RELEVANT CONTEXT FROM YOUR SEMINARS:**
-{context[:1000]}
-
-**CONVERSATION RULES:**
-- Keep responses to 1-4 sentences unless deeper explanation is needed
-- Be direct and actionable
-- Never use surfer slang or fake Aussie phrases
-- Sound like a real coach, not a stereotype
-   
-User: {message}
-Joshua:"""
-    return groq_call(prompt) or "Tell me more about that."
-
-def assistant_response(message):
-    context = get_context(message, top_k=5)
-    prompt = f"""You are Joshua's personal AI assistant. You handle ALL his internal operations.
-
-**YOUR STYLE:**
-- Direct, practical, efficient — no fluff
-- Action-focused: tasks, planning, systems
-- Professional but not robotic
-- Australian English (consistent with Joshua)
-
-**YOUR CAPABILITIES:**
-1. PLANNING & DRAFTING - Session planning, content drafting, brainstorming
-2. TASK MANAGEMENT - Prioritise tasks, break big things into steps
-3. SYSTEMS IMPROVEMENT - Analyse workflows, identify inefficiencies
-
-**RELEVANT CONTEXT:**
-{context[:1500]}
-
-Joshua: {message}
-Assistant:"""
-    return groq_call(prompt, max_tokens=500, temperature=0.5) or "On it."
-
-def clerk_response(message):
-    context = get_context(message, top_k=3)
-    links_str = json.dumps(CLERK_LINKS, indent=2)
-    prompt = f"""You are the Clerk — a no-nonsense admin assistant for Joshua Roy.
-
-**YOUR RESPONSIBILITIES:**
-- Link management: Find and provide links instantly from the library below
-- Admin help: Drafting, planning, organising
-- Be direct, no fluff, one-line descriptions with links
-
-**LINK LIBRARY:**
-{links_str}
-
-**RELEVANT CONTEXT:**
-{context[:800]}
-
-Joshua: {message}
-Clerk:"""
-    return groq_call(prompt, max_tokens=600, temperature=0.3) or "On it."
-
-# ============================================
 # COMMAND HANDLERS
 # ============================================
-async def show_memories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
+    mem_count = len(BOT_MEMORIES[bot_name])
+    msgs = {
+        "joshua":    f"Hey. Joshua Roy here. 🧠 I've got {mem_count} memories stored.\n/memories — see what I remember\n/forget <id> — delete a memory\n/clear — reset this conversation",
+        "assistant": f"Assistant ready. {mem_count} memories available.\n/memories — see stored memories\n/forget <id> — delete a memory\n/clear — reset conversation",
+        "clerk":     f"Clerk ready. {mem_count} memories. {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links loaded.\n/memories — see stored memories\n/forget <id> — delete",
+    }
+    await update.message.reply_text(msgs.get(bot_name, "Ready."))
+
+async def cmd_memories(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
     query = " ".join(context.args) if context.args else ""
+    memories = BOT_MEMORIES[bot_name]
+
+    if not memories:
+        await update.message.reply_text(f"📭 No memories stored for {bot_name}.")
+        return
+
     if query:
-        result = recall_from_working_brain(f"/search {query}", "system")
-        await update.message.reply_text(result[:4000] if result else f"No memories found")
-        return
-    
-    if not WORKING_BRAIN:
-        await update.message.reply_text("📭 No memories yet.")
-        return
-    
-    recent = WORKING_BRAIN[-10:]
-    msg = f"🧠 **Memory Vault ({len(WORKING_BRAIN)} total)**\n\n"
-    for i, m in enumerate(recent, 1):
-        msg += f"{i}. {m.get('summary', '')[:80]}\n"
-        msg += f"   📅 {time.strftime('%Y-%m-%d', time.localtime(m.get('ts', 0)))}\n"
-        if m.get("topics"):
-            msg += f"   📂 {', '.join(m.get('topics', []))}\n"
-        msg += "\n"
+        results = semantic_search(query, bot_name, top_k=5)
+        if not results:
+            await update.message.reply_text(f"🔍 Nothing found for '{query}'.")
+            return
+        msg = f"🔍 Found {len(results)} match(es) for '{query}':\n\n"
+        for m in results:
+            msg += f"ID: {m['id']}\n{m['summary'][:100]}\n📅 {time.strftime('%Y-%m-%d', time.localtime(m['ts']))}\n\n"
+    else:
+        recent = memories[-10:]
+        msg = f"🧠 {bot_name} memories ({len(memories)} total) — last 10:\n\n"
+        for m in recent:
+            msg += f"ID: {m['id']}\n{m['summary'][:100]}\n📅 {time.strftime('%Y-%m-%d', time.localtime(m['ts']))}\n\n"
+
     await update.message.reply_text(msg[:4000])
 
-async def show_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BRAIN_TOPICS:
-        await update.message.reply_text("📂 No topics yet.")
-        return
-    
-    msg = "📂 **Topics:**\n\n"
-    for topic, count in sorted(BRAIN_TOPICS.items(), key=lambda x: x[1], reverse=True):
-        msg += f"• {topic}: {count} memories\n"
-    await update.message.reply_text(msg[:4000])
-
-async def show_summaries(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BRAIN_SUMMARIES:
-        await update.message.reply_text("📝 No summaries yet.")
-        return
-    
-    msg = "📝 **Auto-Summaries**\n\n"
-    for s in BRAIN_SUMMARIES[-5:]:
-        msg += f"📅 {time.strftime('%Y-%m-%d', time.localtime(s.get('timestamp', 0)))}\n"
-        msg += f"{s.get('summary', '')}\n\n"
-    await update.message.reply_text(msg[:4000])
-
-async def memory_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = f"📊 **Memory Stats**\n\n"
-    msg += f"🧠 Entries: {len(WORKING_BRAIN)}\n"
-    msg += f"📂 Topics: {len(BRAIN_TOPICS)}\n"
-    msg += f"📝 Summaries: {len(BRAIN_SUMMARIES)}\n"
-    msg += f"🗑️ Expiry: {MEMORY_EXPIRY_DAYS} days\n"
-    await update.message.reply_text(msg)
-
-async def forget_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
     if not context.args:
-        await update.message.reply_text("Usage: /forget <number>")
+        await update.message.reply_text("Usage: /forget <memory-id>\nGet the ID from /memories")
         return
-    
-    try:
-        index = int(context.args[0]) - 1
-        if 0 <= index < len(WORKING_BRAIN):
-            removed = WORKING_BRAIN.pop(index)
-            save_working_brain()
-            await update.message.reply_text(f"🗑️ Forgot: {removed.get('summary', '')[:100]}")
-        else:
-            await update.message.reply_text("Invalid index.")
-    except ValueError:
-        await update.message.reply_text("Usage: /forget <number>")
+    memory_id = context.args[0]
+    if delete_memory(memory_id, bot_name):
+        await update.message.reply_text(f"🗑️ Deleted memory {memory_id}.")
+    else:
+        await update.message.reply_text(f"❌ No memory found with ID: {memory_id}")
 
-async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    deleted = cleanup_expired_memories()
-    await update.message.reply_text(f"🗑️ Cleaned up {deleted} expired memories.")
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
+    """Reset conversation history for this user."""
+    user_id = update.message.from_user.id
+    clear_history(bot_name, user_id)
+    await update.message.reply_text("🔄 Conversation reset. Fresh start.")
+
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
+    removed = cleanup_expired_memories(bot_name)
+    await update.message.reply_text(f"🗑️ Removed {removed} expired memories from {bot_name}.")
 
 # ============================================
-# TELEGRAM HANDLERS
+# MAIN MESSAGE HANDLER
 # ============================================
-def make_start(bot_name):
+def make_handlers(bot_name, response_func_name):
+    """Returns (start, message_handler) coroutine functions for a given bot."""
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        messages = {
-            "joshua": f"Hey, it's Josh. 🧠 {len(WORKING_BRAIN)} memories\n/topics - Browse topics\n/summaries - View summaries",
-            "assistant": f"Assistant ready. 🧠 {len(WORKING_BRAIN)} memories available",
-            "clerk": f"Clerk ready. 🔗 {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links"
-        }
-        await update.message.reply_text(messages.get(bot_name, "Ready."))
-    return start
+        await cmd_start(update, context, bot_name)
 
-def make_handler(response_func, bot_name):
+    async def memories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await cmd_memories(update, context, bot_name)
+
+    async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await cmd_forget(update, context, bot_name)
+
+    async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await cmd_clear(update, context, bot_name)
+
+    async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await cmd_cleanup(update, context, bot_name)
+
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = update.message.text or ""
-        print(f"📨 {bot_name}: {user_text[:50]}", flush=True)
+        user_id = update.message.from_user.id
+        print(f"📨 [{bot_name}] user={user_id}: {user_text[:60]}", flush=True)
         await update.message.chat.send_action(action="typing")
-        
-        # 1. RECALL (explicit)
-        recall_result = recall_from_working_brain(user_text, bot_name)
-        if recall_result:
-            await update.message.reply_text(recall_result[:4000])
+
+        # --- 1. REMEMBER intent ---
+        if is_remember_intent(user_text):
+            content = extract_memory_content(user_text)
+            if content:
+                mem_id = store_memory(content, bot_name)
+                await update.message.reply_text(f"✅ Remembered (ID: {mem_id}):\n{content[:100]}")
+            else:
+                await update.message.reply_text("What do you want me to remember? Just tell me.")
             return
-        
-        # 2. AUTO-RECALL (implicit)
-        auto_result = auto_recall(user_text)
-        if auto_result:
-            await update.message.reply_text(auto_result[:4000])
+
+        # --- 2. RECALL intent ---
+        if is_recall_intent(user_text):
+            query = user_text
+            for cmd in ["/recall", "/search", "/find", "tell me", "remind me", "what do you know about", "do you remember"]:
+                query = query.replace(cmd, "")
+            query = query.replace("?", "").strip()
+            results = semantic_search(query, bot_name, top_k=5) if query else BOT_MEMORIES[bot_name][-5:]
+            if not results:
+                await update.message.reply_text("🔍 Nothing stored on that.")
+                return
+            msg = f"🔍 {len(results)} result(s):\n\n"
+            for m in results:
+                msg += f"ID: {m['id']}\n{m['summary'][:120]}\n\n"
+            await update.message.reply_text(msg[:4000])
             return
-        
-        # 3. STORE
-        stored = store_in_working_brain(user_text, bot_name)
-        if stored:
-            await update.message.reply_text(f"✅ I'll remember: {stored[:100]}")
-            return
-        
-        # 4. NORMAL RESPONSE
-        response = response_func(user_text)
+
+        # --- 3. NORMAL RESPONSE with context + history ---
+        context_text = get_context(user_text, bot_name)
+        history = get_history(bot_name, user_id)
+
+        # Build system prompt based on bot type
+        if bot_name == "joshua":
+            system = joshua_system(context_text)
+        elif bot_name == "assistant":
+            system = assistant_system(context_text)
+        else:
+            system = clerk_system(context_text, json.dumps(CLERK_LINKS, indent=2))
+
+        # Add user message to history BEFORE calling Groq
+        add_to_history(bot_name, user_id, "user", user_text)
+        updated_history = get_history(bot_name, user_id)
+
+        response = groq_call(system, updated_history, max_tokens=400)
+        if not response:
+            response = "Something went wrong on my end. Try again."
+
+        # Add assistant reply to history
+        add_to_history(bot_name, user_id, "assistant", response)
+
         await update.message.reply_text(response[:4000])
-        
-        # 5. WORKSPACE MEMORY
-        bucket = BOT_BUCKETS.get(bot_name)
-        if bucket:
-            workspace = load_workspace(bucket)
-            if route_workspace_memory(user_text, workspace):
-                save_workspace(bucket, workspace)
-    return handle_message
+
+    return start, handle_message, memories, forget, clear, cleanup
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"❌ Error: {context.error}", flush=True)
@@ -589,11 +509,8 @@ flask_app = Flask(__name__)
 def health():
     return {
         "status": "healthy",
-        "brain_entries": len(WORKING_BRAIN),
-        "topics": len(BRAIN_TOPICS),
-        "summaries": len(BRAIN_SUMMARIES),
-        "bots": ["joshua", "assistant", "clerk"],
-        "features": ["semantic_search", "auto_summaries", "topic_folders", "auto_recall", "memory_expiry"]
+        "memories": {bot: len(mems) for bot, mems in BOT_MEMORIES.items()},
+        "bots": list(BOT_BUCKETS.keys()),
     }, 200
 
 def run_flask():
@@ -601,66 +518,63 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ============================================
-# MAIN - RUN ALL BOTS
+# MAIN
 # ============================================
 async def run_all_bots():
     time.sleep(3)
-    cleanup_expired_memories()
-    
+
+    # Cleanup expired memories on startup
+    for bot_name in BOT_BUCKETS:
+        removed = cleanup_expired_memories(bot_name)
+        if removed:
+            print(f"🗑️ {bot_name}: removed {removed} expired memories", flush=True)
+
     bots = [
-        (TELEGRAM_TOKEN, "joshua", joshua_response),
-        (ASSISTANT_TELEGRAM_TOKEN, "assistant", assistant_response),
-        (CLERK_TELEGRAM_TOKEN, "clerk", clerk_response),
+        (TELEGRAM_TOKEN,           "joshua"),
+        (ASSISTANT_TELEGRAM_TOKEN, "assistant"),
+        (CLERK_TELEGRAM_TOKEN,     "clerk"),
     ]
-    
+
     apps = []
-    for token, name, response_func in bots:
+    for token, name in bots:
         if not token:
             print(f"⚠️ Skipping {name} — no token", flush=True)
             continue
-        
+
+        start_h, msg_h, mem_h, forget_h, clear_h, cleanup_h = make_handlers(name, name)
+
         app = Application.builder().token(token).build()
-        
-        # Add command handlers
-        app.add_handler(CommandHandler("start", make_start(name)))
-        app.add_handler(CommandHandler("memories", show_memories))
-        app.add_handler(CommandHandler("recall", show_memories))
-        app.add_handler(CommandHandler("search", show_memories))
-        app.add_handler(CommandHandler("topics", show_topics))
-        app.add_handler(CommandHandler("summaries", show_summaries))
-        app.add_handler(CommandHandler("stats", memory_stats))
-        app.add_handler(CommandHandler("forget", forget_memory))
-        app.add_handler(CommandHandler("cleanup", cleanup_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, make_handler(response_func, name)))
+        app.add_handler(CommandHandler("start",    start_h))
+        app.add_handler(CommandHandler("memories", mem_h))
+        app.add_handler(CommandHandler("recall",   mem_h))
+        app.add_handler(CommandHandler("search",   mem_h))
+        app.add_handler(CommandHandler("forget",   forget_h))
+        app.add_handler(CommandHandler("clear",    clear_h))
+        app.add_handler(CommandHandler("cleanup",  cleanup_h))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_h))
         app.add_error_handler(error_handler)
-        
+
         await app.bot.delete_webhook(drop_pending_updates=True)
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        print(f"🚀 {name} bot running", flush=True)
+        print(f"🚀 {name} bot running — {len(BOT_MEMORIES[name])} memories", flush=True)
         apps.append(app)
-    
-    print(f"\n✅ {len(apps)} bots running with ADVANCED MEMORY", flush=True)
-    print(f"🧠 Working Brain: {len(WORKING_BRAIN)} memories", flush=True)
-    print(f"📂 Topics: {len(BRAIN_TOPICS)} categories", flush=True)
-    print(f"📝 Summaries: {len(BRAIN_SUMMARIES)}", flush=True)
-    
+
+    print(f"\n✅ {len(apps)} bots running", flush=True)
     while True:
         await asyncio.sleep(1)
 
-# ============================================
-# ENTRY POINT
-# ============================================
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         print("❌ TELEGRAM_TOKEN missing!", flush=True)
         sys.exit(1)
-    
-    # Start Flask health check in background
+
+    load_all_memories()
+
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     time.sleep(1)
-    
-    print("🚀 Starting advanced memory system...", flush=True)
+
+    print("🚀 Starting bots...", flush=True)
     asyncio.run(run_all_bots())
