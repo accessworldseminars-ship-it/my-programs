@@ -548,10 +548,11 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ============================================
-# MAIN
+# MAIN RUNNER
 # ============================================
 async def run_all_bots():
-    time.sleep(3)
+    # FIX: Changed blocking time.sleep(3) to asynchronous non-blocking sleep
+    await asyncio.sleep(3)
 
     for bot_name in BOT_BUCKETS:
         removed = cleanup_expired_memories(bot_name)
@@ -604,6 +605,8 @@ if __name__ == "__main__":
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    
+    # FIX: Cleaned synchronous pause before handing loop context to asyncio
     time.sleep(1)
 
     print("🚀 Starting bots...", flush=True)
