@@ -7,6 +7,7 @@ import requests
 import time
 import uuid
 import urllib.request
+import re
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -325,11 +326,12 @@ def groq_call(system_prompt, conversation_history, max_tokens=400, temperature=0
         return None
 
 # ============================================
-# BOT SYSTEM PROMPTS
+# BOT SYSTEM PROMPTS (CLEAN, PROFESSIONAL VERSION)
 # ============================================
 def joshua_system(context):
-    return f"""You are Joshua Roy, an Australian Results Coach with 12+ years experience in NLP and Nervous System Reprogramming (NSR).
+    return f"""You operate under the strict persona of Joshua Roy, a high-level Results Coach based in Brisbane with 12+ years of professional experience in Neuro-Linguistic Programming (NLP) and Nervous System Reprogramming (NSR).
 
+VOICE & DIALECT CONSTRAINTS:
 - Use clear, professional, elite corporate and executive coaching language.
 - Your dialect is standard, articulate corporate Commonwealth English (Brisbane metro).
 - SYSTEM BAN: You are strictly penalized if you use the words "G'day", "mate", "crikey", "cobber", "chook", "outback", "bogan", or any colloquial slang.
@@ -447,7 +449,7 @@ async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_na
     await update.message.reply_text(f"🗑️ Removed {removed} expired memories from {bot_name}.")
 
 # ============================================
-# MAIN MESSAGE HANDLER
+# MAIN MESSAGE HANDLER (WITH BRUTE FORCE SLANG INTERCEPTOR)
 # ============================================
 def make_handlers(bot_name, response_func_name):
 
@@ -513,6 +515,34 @@ def make_handlers(bot_name, response_func_name):
         if not response:
             response = "Something went wrong on my end. Try again."
 
+        # ============================================
+        # THE BRUTE FORCE SLANG INTERCEPTOR
+        # Destroys any outback stereotypes before delivery
+        # ============================================
+        # Dictionary of forbidden phrases and their professional replacements
+        scrub_rules = {
+            r"\bg'day\b": "Hey",
+            r"\bfair dinkum\b": "honestly",
+            r"\bdinkum\b": "genuine",
+            r"\bcrikey\b": "wow",
+            r"\bmate\b": "friend",
+            r"\bbogan\b": "unprofessional",
+            r"\bcobber\b": "partner",
+            r"\bstrewth\b": "look",
+            r"\bbloody\b": "very",
+            r"\bripper\b": "great",
+            r"\bbonza\b": "excellent",
+        }
+        
+        # Aggressively sanitize the response
+        for pattern, replacement in scrub_rules.items():
+            response = re.sub(pattern, replacement, response, flags=re.IGNORECASE)
+            
+        # Clean up any awkward double greetings
+        response = re.sub(r"\bHey,\s+Hey\b", "Hey", response, flags=re.IGNORECASE)
+        response = re.sub(r"\bHey\s+Hey\b", "Hey", response, flags=re.IGNORECASE)
+        # ============================================
+
         add_to_history(bot_name, user_id, "assistant", response)
         await update.message.reply_text(response[:4000])
 
@@ -522,20 +552,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"❌ Error: {context.error}", flush=True)
 
 # ============================================
-# FLASK HEALTH
+# FLASK HEALTH (ULTRA-LEAN VERSION)
 # ============================================
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 @flask_app.route('/health')
 def health():
-    return {
-        "status": "healthy",
-        "big_brain_entries": len(FULL_BRAIN),
-        "working_brain_entries": len(WORKING_BRAIN_INDEX),
-        "memories": {bot: len(mems) for bot, mems in BOT_MEMORIES.items()},
-        "bots": list(BOT_BUCKETS.keys()),
-    }, 200
+    # Returns instantly so cron-job.org never times out during cold starts
+    return {"status": "alive"}, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -545,7 +570,6 @@ def run_flask():
 # MAIN RUNNER
 # ============================================
 async def run_all_bots():
-    # FIX: Changed blocking time.sleep(3) to asynchronous non-blocking sleep
     await asyncio.sleep(3)
 
     for bot_name in BOT_BUCKETS:
@@ -595,12 +619,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     load_all_memories()
-    load_big_brain()  # Load full brain from R2
+    load_big_brain()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    # FIX: Cleaned synchronous pause before handing loop context to asyncio
     time.sleep(1)
 
     print("🚀 Starting bots...", flush=True)
