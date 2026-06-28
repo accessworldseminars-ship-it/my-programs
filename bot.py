@@ -14,6 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from datetime import datetime
 
 print("=== AccessWorld Bot Squad Starting ===", flush=True)
 
@@ -42,23 +43,16 @@ BRAIN_FULL_KEY = "joshua_brain_full.json"
 
 MEMORY_EXPIRY_DAYS = 90
 AUTO_SUMMARY_THRESHOLD = 50
+MAX_CONTEXT_MESSAGES = 15   # number of recent messages to keep in context
 
 # ============================================
-# IN-MEMORY STORES
+# IN-MEMORY STORES (for the "memories" command – separate notes)
 # ============================================
 BOT_MEMORIES = {
     "joshua":    [],
     "assistant": [],
     "clerk":     [],
 }
-
-CONVERSATION_HISTORY = {
-    "joshua":    {},
-    "assistant": {},
-    "clerk":     {},
-}
-
-MAX_HISTORY_TURNS = 20
 
 # Big Brain loaded at startup
 WORKING_BRAIN_INDEX = []   # list of {id, summary} for keyword search
@@ -111,12 +105,120 @@ def r2_put(bucket, key, data):
         return False
 
 # ============================================
+# PER-USER MEMORY CLASS
+# ============================================
+class UserMemory:
+    def __init__(self, bot_name, user_id, r2_client, bucket):
+        self.bot_name = bot_name
+        self.user_id = str(user_id)
+        self.r2 = r2_client
+        self.bucket = bucket
+        self.key = f"user_{self.user_id}.json"
+        self.data = self._load()
+        self.dirty = False  # track if we need to save
+
+    def _load(self):
+        raw = r2_get(self.bucket, self.key)
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception as e:
+                print(f"❌ Error parsing user memory {self.key}: {e}", flush=True)
+                # fallback to empty
+                return self._empty_data()
+        return self._empty_data()
+
+    def _empty_data(self):
+        return {
+            "user_id": self.user_id,
+            "summary": "",
+            "history": [],
+            "last_updated": datetime.utcnow().isoformat()
+        }
+
+    def save(self):
+        if self.dirty:
+            self.data["last_updated"] = datetime.utcnow().isoformat()
+            r2_put(self.bucket, self.key, self.data)
+            self.dirty = False
+
+    def add_message(self, role, content):
+        self.data["history"].append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        self.dirty = True
+        # Check if we need to summarize
+        if len(self.data["history"]) > AUTO_SUMMARY_THRESHOLD:
+            self._summarize()
+        self.save()
+
+    def _summarize(self):
+        """Summarize the oldest half of history, keep only the recent half."""
+        history = self.data["history"]
+        mid = len(history) // 2
+        old_part = history[:mid]
+        new_part = history[mid:]
+
+        # Build a text to summarize
+        conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in old_part])
+        summary_prompt = (
+            "You are a summarization assistant. Condense the following conversation into a concise paragraph (max 100 words) "
+            "that captures key topics, user goals, and important details. Keep the summary neutral and factual."
+        )
+        # Call Groq (synchronous for simplicity)
+        summary = self._call_groq_summary(summary_prompt, conversation_text)
+        if summary:
+            # Prepend new summary to existing summary
+            if self.data["summary"]:
+                self.data["summary"] = summary + "\n\n" + self.data["summary"]
+            else:
+                self.data["summary"] = summary
+            self.data["history"] = new_part
+            self.dirty = True
+            print(f"🧠 {self.bot_name} user {self.user_id}: summarized {len(old_part)} messages", flush=True)
+
+    def _call_groq_summary(self, system_prompt, user_text):
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Summarize this conversation:\n\n{user_text}"}
+                    ],
+                    "max_tokens": 200,
+                    "temperature": 0.3,
+                },
+                timeout=25
+            )
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"❌ Groq summary error: {e}", flush=True)
+        return None
+
+    def get_context(self, limit=MAX_CONTEXT_MESSAGES):
+        """Return summary + last `limit` messages as a string for the LLM prompt."""
+        parts = []
+        if self.data["summary"]:
+            parts.append(f"📝 Previous summary: {self.data['summary']}\n")
+        recent = self.data["history"][-limit:]
+        if recent:
+            parts.append("Recent conversation:")
+            for msg in recent:
+                parts.append(f"{msg['role'].capitalize()}: {msg['content']}")
+        return "\n".join(parts)
+
+# ============================================
 # LOAD BIG BRAIN FROM R2
 # ============================================
 def load_big_brain():
     global WORKING_BRAIN_INDEX, FULL_BRAIN
 
-    # Load working brain index (fast keyword search)
     print("🧠 Loading Working Brain index from R2...", flush=True)
     raw_index = r2_get(BRAIN_BUCKET, BRAIN_INDEX_KEY)
     if raw_index:
@@ -128,7 +230,6 @@ def load_big_brain():
     else:
         print("⚠️ Working Brain index not found in R2", flush=True)
 
-    # Load full brain (for full text retrieval)
     print("🧠 Loading Full Brain from R2...", flush=True)
     raw_full = r2_get(BRAIN_BUCKET, BRAIN_FULL_KEY)
     if raw_full:
@@ -170,7 +271,7 @@ def brain_search(query, top_k=3):
     return results
 
 # ============================================
-# LOAD / SAVE PER-BOT MEMORIES
+# LOAD / SAVE PER-BOT MEMORIES (for notes)
 # ============================================
 def load_bot_memories(bot_name):
     bucket = BOT_BUCKETS[bot_name]
@@ -196,7 +297,7 @@ def load_all_memories():
         load_bot_memories(bot_name)
 
 # ============================================
-# SEMANTIC SEARCH (per-bot memories)
+# SEMANTIC SEARCH (per-bot memories – notes)
 # ============================================
 def semantic_search(query, bot_name, top_k=5):
     query_words = set(query.lower().split())
@@ -209,8 +310,8 @@ def semantic_search(query, bot_name, top_k=5):
     scored.sort(reverse=True, key=lambda x: x[0])
     return [e for _, e in scored[:top_k]]
 
-def get_context(message, bot_name, top_k=3):
-    # Search bot's own R2 memories
+def get_context(message, bot_name, user_memory, top_k=3):
+    # Search bot's own R2 memories (notes)
     local_matches = semantic_search(message, bot_name, top_k=top_k)
     local_text = "\n\n".join([m.get("text", "") for m in local_matches])
 
@@ -220,30 +321,19 @@ def get_context(message, bot_name, top_k=3):
 
     combined = []
     if local_text:
-        combined.append(f"[Your memories]\n{local_text}")
+        combined.append(f"[Your notes]\n{local_text}")
     if brain_text:
         combined.append(f"[Seminar content]\n{brain_text}")
+
+    # Add per-user conversation context
+    conv_context = user_memory.get_context()
+    if conv_context:
+        combined.append(f"[Conversation history]\n{conv_context}")
+
     return "\n\n".join(combined)
 
 # ============================================
-# CONVERSATION HISTORY MANAGEMENT
-# ============================================
-def get_history(bot_name, user_id):
-    return CONVERSATION_HISTORY[bot_name].get(str(user_id), [])
-
-def add_to_history(bot_name, user_id, role, content):
-    uid = str(user_id)
-    if uid not in CONVERSATION_HISTORY[bot_name]:
-        CONVERSATION_HISTORY[bot_name][uid] = []
-    CONVERSATION_HISTORY[bot_name][uid].append({"role": role, "content": content})
-    if len(CONVERSATION_HISTORY[bot_name][uid]) > MAX_HISTORY_TURNS * 2:
-        CONVERSATION_HISTORY[bot_name][uid] = CONVERSATION_HISTORY[bot_name][uid][-(MAX_HISTORY_TURNS * 2):]
-
-def clear_history(bot_name, user_id):
-    CONVERSATION_HISTORY[bot_name][str(user_id)] = []
-
-# ============================================
-# MEMORY STORE / RECALL / DELETE
+# MEMORY STORE / RECALL / DELETE (for notes)
 # ============================================
 def store_memory(text, bot_name):
     memory_id = str(uuid.uuid4())[:8]
@@ -289,7 +379,7 @@ def extract_memory_content(text):
     return result.strip()
 
 # ============================================
-# CLEANUP
+# CLEANUP (for notes, not conversation history)
 # ============================================
 def cleanup_expired_memories(bot_name):
     expiry = int(time.time()) - (MEMORY_EXPIRY_DAYS * 24 * 3600)
@@ -399,9 +489,9 @@ CLERK_LINKS = load_clerk_links()
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
     mem_count = len(BOT_MEMORIES[bot_name])
     msgs = {
-        "joshua":    f"Hey. Joshua Roy here. 🧠 {mem_count} memories stored. Big Brain: {len(FULL_BRAIN)} entries.\n/memories — see what I remember\n/forget <id> — delete a memory\n/clear — reset this conversation",
-        "assistant": f"Assistant ready. {mem_count} memories available.\n/memories — see stored memories\n/forget <id> — delete a memory\n/clear — reset conversation",
-        "clerk":     f"Clerk ready. {mem_count} memories. {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links loaded.\n/memories — see stored memories\n/forget <id> — delete",
+        "joshua":    f"Hey. Joshua Roy here. 🧠 {mem_count} notes stored. Big Brain: {len(FULL_BRAIN)} entries.\n/memories — see what I remember\n/forget <id> — delete a memory\n/clear — reset this conversation",
+        "assistant": f"Assistant ready. {mem_count} notes available.\n/memories — see stored memories\n/forget <id> — delete a memory\n/clear — reset conversation",
+        "clerk":     f"Clerk ready. {mem_count} notes. {sum(len(v) for v in CLERK_LINKS.values()) if CLERK_LINKS else 0} links loaded.\n/memories — see stored memories\n/forget <id> — delete",
     }
     await update.message.reply_text(msgs.get(bot_name, "Ready."))
 
@@ -440,9 +530,19 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_nam
         await update.message.reply_text(f"❌ No memory found with ID: {memory_id}")
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
+    # Clear the per-user conversation history
     user_id = update.message.from_user.id
-    clear_history(bot_name, user_id)
-    await update.message.reply_text("🔄 Conversation reset. Fresh start.")
+    # We'll simply delete the user's file or reset it
+    bucket = BOT_BUCKETS[bot_name]
+    key = f"user_{user_id}.json"
+    # Delete the file if it exists
+    try:
+        s3 = get_r2_client()
+        s3.delete_object(Bucket=bucket, Key=key)
+        await update.message.reply_text("🔄 Conversation reset. Fresh start.")
+    except Exception as e:
+        await update.message.reply_text("Couldn't clear history, but I'll start fresh anyway.")
+        # fallback: we can't delete, but we can force a new memory object next time
 
 async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_name: str):
     removed = cleanup_expired_memories(bot_name)
@@ -474,6 +574,7 @@ def make_handlers(bot_name, response_func_name):
         print(f"📨 [{bot_name}] user={user_id}: {user_text[:60]}", flush=True)
         await update.message.chat.send_action(action="typing")
 
+        # ---- Handle /remember and /recall (notes) ----
         if is_remember_intent(user_text):
             content = extract_memory_content(user_text)
             if content:
@@ -498,9 +599,18 @@ def make_handlers(bot_name, response_func_name):
             await update.message.reply_text(msg[:4000])
             return
 
-        context_text = get_context(user_text, bot_name)
-        history = get_history(bot_name, user_id)
+        # ---- PER-USER CONVERSATION MEMORY ----
+        bucket = BOT_BUCKETS[bot_name]
+        r2 = get_r2_client()
+        user_memory = UserMemory(bot_name, user_id, r2, bucket)
 
+        # Add user message to history
+        user_memory.add_message("user", user_text)
+
+        # Build context for LLM
+        context_text = get_context(user_text, bot_name, user_memory)
+
+        # Build system prompt
         if bot_name == "joshua":
             system = joshua_system(context_text)
         elif bot_name == "assistant":
@@ -508,10 +618,11 @@ def make_handlers(bot_name, response_func_name):
         else:
             system = clerk_system(context_text, json.dumps(CLERK_LINKS, indent=2))
 
-        add_to_history(bot_name, user_id, "user", user_text)
-        updated_history = get_history(bot_name, user_id)
+        # Get conversation history for the LLM (the full history list, not just context)
+        # We'll use the most recent MAX_HISTORY_TURNS messages
+        history = user_memory.data["history"][-20:]  # last 20 turns
 
-        response = groq_call(system, updated_history, max_tokens=400)
+        response = groq_call(system, history, max_tokens=400)
         if not response:
             response = "Something went wrong on my end. Try again."
 
@@ -519,7 +630,6 @@ def make_handlers(bot_name, response_func_name):
         # THE BRUTE FORCE SLANG INTERCEPTOR
         # Destroys any outback stereotypes before delivery
         # ============================================
-        # Dictionary of forbidden phrases and their professional replacements
         scrub_rules = {
             r"\bg'day\b": "Hey",
             r"\bfair dinkum\b": "honestly",
@@ -534,16 +644,16 @@ def make_handlers(bot_name, response_func_name):
             r"\bbonza\b": "excellent",
         }
         
-        # Aggressively sanitize the response
         for pattern, replacement in scrub_rules.items():
             response = re.sub(pattern, replacement, response, flags=re.IGNORECASE)
-            
-        # Clean up any awkward double greetings
         response = re.sub(r"\bHey,\s+Hey\b", "Hey", response, flags=re.IGNORECASE)
         response = re.sub(r"\bHey\s+Hey\b", "Hey", response, flags=re.IGNORECASE)
         # ============================================
 
-        add_to_history(bot_name, user_id, "assistant", response)
+        # Add assistant response to user memory
+        user_memory.add_message("assistant", response)
+        # Save is automatic via add_message
+
         await update.message.reply_text(response[:4000])
 
     return start, handle_message, memories, forget, clear, cleanup
@@ -606,7 +716,7 @@ async def run_all_bots():
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        print(f"🚀 {name} bot running — {len(BOT_MEMORIES[name])} memories", flush=True)
+        print(f"🚀 {name} bot running — {len(BOT_MEMORIES[name])} notes", flush=True)
         apps.append(app)
 
     print(f"\n✅ {len(apps)} bots running", flush=True)
